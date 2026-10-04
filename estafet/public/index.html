@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Estafet — chat yang oper-operan model</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Figtree:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #eef2ee;
+    --panel: #f8faf7;
+    --ink: #17211c;
+    --muted: #5f6e66;
+    --line: #d3dcd5;
+    --accent: #0f6b5a;
+    --accent-ink: #ffffff;
+    --relay: #b8710a;
+    --code-bg: #e1e9e3;
+    --display: "Bricolage Grotesque", "Trebuchet MS", system-ui, sans-serif;
+    --body: "Figtree", system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #101613;
+      --panel: #171f1b;
+      --ink: #e6ede8;
+      --muted: #8d9d94;
+      --line: #28342e;
+      --accent: #2fae93;
+      --accent-ink: #07130f;
+      --relay: #e3a23c;
+      --code-bg: #1f2a25;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 16px;
+    line-height: 1.55;
+    display: flex;
+    flex-direction: column;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  header {
+    width: 100%;
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 16px 20px 12px;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  h1 {
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: 1.6rem;
+    letter-spacing: -0.02em;
+    margin: 0;
+  }
+  .sub { color: var(--muted); font-size: 0.85rem; margin-left: 10px; font-weight: 400; font-family: var(--body); letter-spacing: 0; }
+  button { font: inherit; cursor: pointer; }
+  .ghost {
+    background: none; border: 1px solid var(--line); color: var(--ink);
+    padding: 6px 12px; border-radius: 8px;
+  }
+  .ghost:hover { background: var(--panel); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  main {
+    flex: 1;
+    overflow-y: auto;
+    width: 100%;
+  }
+  #log {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 8px 20px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 22px;
+  }
+  .empty {
+    margin: 12vh 0 0;
+    color: var(--muted);
+    max-width: 46ch;
+  }
+  .empty strong { color: var(--ink); font-family: var(--display); font-size: 1.25rem; display: block; margin-bottom: 6px; }
+
+  .msg.user {
+    align-self: flex-end;
+    max-width: 85%;
+    background: var(--accent);
+    color: var(--accent-ink);
+    padding: 10px 14px;
+    border-radius: 16px 16px 4px 16px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .msg.bot {
+    border-left: 3px solid var(--line);
+    padding-left: 14px;
+    overflow-wrap: anywhere;
+  }
+  .msg.bot .text { white-space: pre-wrap; }
+  .msg.bot.err { border-left-color: #c0392b; color: #c0392b; }
+  .tag {
+    margin-top: 6px;
+    font-size: 0.78rem;
+    color: var(--muted);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+  }
+  .tag .relay { color: var(--relay); font-weight: 600; }
+  pre {
+    background: var(--code-bg);
+    padding: 12px 14px;
+    border-radius: 8px;
+    overflow-x: auto;
+    margin: 10px 0;
+    white-space: pre;
+    font-size: 0.88rem;
+  }
+  code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.9em; }
+  :not(pre) > code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+  .dots::after { content: "…"; animation: blink 1s steps(2, start) infinite; }
+  @keyframes blink { to { visibility: hidden; } }
+  @media (prefers-reduced-motion: reduce) { .dots::after { animation: none; } }
+
+  form {
+    width: 100%;
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 8px 20px 16px;
+    display: flex;
+    gap: 10px;
+    align-items: flex-end;
+  }
+  textarea {
+    flex: 1;
+    resize: none;
+    max-height: 180px;
+    font: inherit;
+    color: var(--ink);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 11px 14px;
+  }
+  textarea::placeholder { color: var(--muted); }
+  #send {
+    background: var(--accent); color: var(--accent-ink);
+    border: 0; border-radius: 12px; padding: 11px 18px; font-weight: 600;
+  }
+  #send:disabled { opacity: 0.5; cursor: default; }
+  #send.stop { background: var(--ink); color: var(--bg); }
+  @media (max-width: 480px) { .sub { display: none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Estafet<span class="sub">kalau satu model mati, model lain lanjut</span></h1>
+  <button class="ghost" id="reset" type="button">Chat baru</button>
+</header>
+
+<main id="scroller">
+  <div id="log" aria-live="polite"></div>
+</main>
+
+<form id="form">
+  <textarea id="input" rows="1" placeholder="Tulis pesan, Enter untuk kirim" aria-label="Pesan"></textarea>
+  <button id="send" type="submit">Kirim</button>
+</form>
+
+<script>
+const log = document.getElementById("log");
+const scroller = document.getElementById("scroller");
+const form = document.getElementById("form");
+const input = document.getElementById("input");
+const sendBtn = document.getElementById("send");
+
+let history = [];
+let controller = null;
+
+function showEmpty() {
+  log.innerHTML = '<div class="empty"><strong>Mulai ngobrol.</strong>Setiap jawaban dikirim lewat model gratis OpenRouter. Kalau modelnya penuh atau mati, pesanmu otomatis dioper ke model berikutnya.</div>';
+}
+showEmpty();
+
+function esc(s) {
+  return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+// Render sederhana: blok kode ``` dan `kode` inline, sisanya teks biasa.
+function render(text) {
+  const parts = text.split("```");
+  return parts.map((p, i) => {
+    if (i % 2 === 1) {
+      const body = p.replace(/^[^\n]*\n/, "");
+      return "<pre><code>" + esc(body.replace(/\n$/, "")) + "</code></pre>";
+    }
+    return esc(p).replace(/`([^`\n]+)`/g, "<code>$1</code>");
+  }).join("");
+}
+
+function addUser(text) {
+  if (log.querySelector(".empty")) log.innerHTML = "";
+  const d = document.createElement("div");
+  d.className = "msg user";
+  d.textContent = text;
+  log.appendChild(d);
+  scroller.scrollTop = scroller.scrollHeight;
+}
+
+function addBot() {
+  const d = document.createElement("div");
+  d.className = "msg bot";
+  d.innerHTML = '<div class="text dots"></div><div class="tag"></div>';
+  log.appendChild(d);
+  scroller.scrollTop = scroller.scrollHeight;
+  return d;
+}
+
+function setBusy(busy) {
+  sendBtn.textContent = busy ? "Berhenti" : "Kirim";
+  sendBtn.classList.toggle("stop", busy);
+}
+
+async function ask(text) {
+  addUser(text);
+  history.push({ role: "user", content: text });
+  const bot = addBot();
+  const textEl = bot.querySelector(".text");
+  const tagEl = bot.querySelector(".tag");
+  let answer = "";
+
+  controller = new AbortController();
+  setBusy(true);
+
+  try {
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: history }),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      let msg = "Terjadi kesalahan.";
+      try { msg = (await res.json()).error || msg; } catch {}
+      throw new Error(msg);
+    }
+
+    const model = res.headers.get("X-Model-Used") || "";
+    const skipped = Number(res.headers.get("X-Models-Skipped") || 0);
+    tagEl.innerHTML = "";
+    const m = document.createElement("span");
+    m.textContent = model;
+    tagEl.appendChild(m);
+    if (skipped > 0) {
+      const r = document.createElement("span");
+      r.className = "relay";
+      r.textContent = skipped + " model dilewati karena gagal";
+      tagEl.appendChild(r);
+    }
+
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    textEl.classList.remove("dots");
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice(5).trim();
+        if (!data || data === "[DONE]") continue;
+        try {
+          const j = JSON.parse(data);
+          if (j.error) throw new Error(j.error.message || "Model berhenti di tengah jalan.");
+          const delta = j.choices?.[0]?.delta?.content;
+          if (delta) {
+            answer += delta;
+            textEl.innerHTML = render(answer);
+            scroller.scrollTop = scroller.scrollHeight;
+          }
+        } catch (e) {
+          if (e.message && !(e instanceof SyntaxError)) throw e;
+        }
+      }
+    }
+    if (answer) history.push({ role: "assistant", content: answer });
+    else textEl.textContent = "(model tidak mengirim jawaban)";
+  } catch (e) {
+    textEl.classList.remove("dots");
+    if (e.name === "AbortError") {
+      if (answer) history.push({ role: "assistant", content: answer });
+      else { bot.remove(); history.pop(); }
+    } else {
+      bot.classList.add("err");
+      textEl.textContent = e.message;
+      if (!answer) history.pop();
+    }
+  } finally {
+    controller = null;
+    setBusy(false);
+    input.focus();
+  }
+}
+
+form.addEventListener("submit", (e) => {
+  e.preventDefault();
+  if (controller) { controller.abort(); return; }
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = "";
+  input.style.height = "auto";
+  ask(text);
+});
+
+input.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    form.requestSubmit();
+  }
+});
+input.addEventListener("input", () => {
+  input.style.height = "auto";
+  input.style.height = Math.min(input.scrollHeight, 180) + "px";
+});
+
+document.getElementById("reset").addEventListener("click", () => {
+  if (controller) controller.abort();
+  history = [];
+  showEmpty();
+});
+</script>
+</body>
+</html>

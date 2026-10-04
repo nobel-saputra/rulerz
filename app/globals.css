@@ -1,0 +1,81 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #eef2ee;
+  --panel: #f8faf7;
+  --ink: #17211c;
+  --muted: #5f6e66;
+  --line: #d3dcd5;
+  --accent: #0f6b5a;
+  --accent-ink: #ffffff;
+  --relay: #b8710a;
+  --code-bg: #e1e9e3;
+  --display: "Poppins", system-ui, sans-serif;
+  --body: "Poppins", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #101613;
+    --panel: #171f1b;
+    --ink: #e6ede8;
+    --muted: #8d9d94;
+    --line: #28342e;
+    --accent: #2fae93;
+    --accent-ink: #07130f;
+    --relay: #e3a23c;
+    --code-bg: #1f2a25;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--body);
+  font-size: 16px;
+  line-height: 1.55;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+button { font: inherit; cursor: pointer; }
+.ghost {
+  background: none; border: 1px solid var(--line); color: var(--ink);
+  padding: 6px 12px; border-radius: 8px;
+}
+.ghost:hover { background: var(--panel); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.dots::after { content: "…"; animation: blink 1s steps(2, start) infinite; }
+@keyframes blink { to { visibility: hidden; } }
+@media (prefers-reduced-motion: reduce) { .dots::after { animation: none; } }
+
+@keyframes popIn {
+  0% { transform: translateY(8px) scale(0.85); opacity: 0; }
+  60% { transform: translateY(-3px) scale(1.04); opacity: 1; }
+  100% { transform: translateY(0) scale(1); opacity: 1; }
+}
+.pop-in {
+  animation: popIn 0.28s ease-out;
+  transform-origin: bottom right;
+}
+.pop-in-left {
+  animation: popIn 0.28s ease-out;
+  transform-origin: bottom left;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pop-in, .pop-in-left { animation: none; }
+}
+
+pre {
+  background: var(--code-bg);
+  padding: 12px 14px;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: 10px 0;
+  white-space: pre;
+  font-size: 0.88rem;
+}
+code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.9em; }
+:not(pre) > code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
