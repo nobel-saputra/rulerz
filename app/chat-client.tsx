@@ -554,6 +554,18 @@ export default function ChatClient() {
           History
         </button>
 
+        <footer className="mt-8 w-full max-w-[420px] border-t border-[var(--line)] pt-4 text-sm text-[var(--muted)]">
+          Made by{" "}
+          <a
+            href="https://github.com/nobel-saputra/rulerz"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-semibold text-[var(--ink)] underline-offset-4 hover:underline"
+          >
+            nobelsaputra
+          </a>
+        </footer>
+
         {historyOverlay}
       </div>
     );
@@ -685,7 +697,7 @@ export default function ChatClient() {
       </main>
 
       <form
-        className="mx-auto flex w-full max-w-[760px] items-end gap-2.5 px-5 pb-4 pt-2"
+        className="mx-auto flex w-full max-w-[760px] items-end gap-2.5 px-5 pb-2 pt-2"
         onSubmit={(e) => {
           e.preventDefault();
           submit();
@@ -722,6 +734,18 @@ export default function ChatClient() {
           {busy ? "Stop" : "Send"}
         </button>
       </form>
+
+      <footer className="mx-auto w-full max-w-[760px] border-t border-[var(--line)] px-5 pb-5 pt-3 text-center text-xs text-[var(--muted)]">
+        Made by{" "}
+        <a
+          href="https://github.com/nobel-saputra/rulerz"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="font-semibold text-[var(--ink)] underline-offset-4 hover:underline"
+        >
+          nobelsaputra
+        </a>
+      </footer>
 
       {historyOverlay}
     </div>
