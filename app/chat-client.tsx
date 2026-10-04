@@ -424,8 +424,8 @@ export default function ChatClient() {
     ];
 
     return (
-      <div className="flex min-h-full flex-1 flex-col items-center justify-center gap-5 px-6 text-center">
-        <h1 className="font-[var(--display)] text-4xl font-bold tracking-tight">Rulerz</h1>
+      <div className="flex min-h-full flex-1 flex-col items-center justify-center gap-5 px-4 py-8 text-center sm:px-6">
+        <h1 className="font-[var(--display)] text-3xl font-bold tracking-tight sm:text-4xl">Rulerz</h1>
         <p className="max-w-[46ch] text-[var(--muted)]">
           Your AI assistant. Pick a personality and a response language, then start chatting.
         </p>
@@ -573,9 +573,9 @@ export default function ChatClient() {
 
   return (
     <div className="flex min-h-full flex-1 flex-col">
-      <header className="mx-auto flex w-full max-w-[760px] items-baseline justify-between gap-3 px-5 pb-3 pt-4">
+      <header className="mx-auto flex w-full max-w-[760px] flex-wrap items-baseline justify-between gap-3 px-4 pb-3 pt-4 sm:px-5">
         <h1
-          className="cursor-pointer font-[var(--display)] text-[1.6rem] font-bold tracking-tight transition hover:opacity-70"
+          className="cursor-pointer font-[var(--display)] text-2xl font-bold tracking-tight transition hover:opacity-70 sm:text-[1.6rem]"
           onClick={() => {
             Swal.fire({
               title: "Hey, are you wanna stay?",
@@ -647,7 +647,7 @@ export default function ChatClient() {
       </header>
 
       <main ref={scrollerRef} className="w-full flex-1 overflow-y-auto">
-        <div ref={logRef} className="mx-auto flex max-w-[760px] flex-col gap-[22px] px-5 pb-6 pt-2" aria-live="polite">
+        <div ref={logRef} className="mx-auto flex max-w-[760px] flex-col gap-[22px] px-4 pb-6 pt-2 sm:px-5" aria-live="polite">
           {msgs.length === 0 && (
             <div className="mt-[12vh] max-w-[46ch] text-[var(--muted)]">
               <strong className="mb-1.5 block font-[var(--display)] text-[1.25rem] text-[var(--ink)]">
@@ -662,7 +662,7 @@ export default function ChatClient() {
               return (
                 <div
                   key={m.id}
-                  className="pop-in max-w-[85%] self-end whitespace-pre-wrap rounded-[16px_16px_4px_16px] bg-[var(--accent)] px-[14px] py-[10px] text-[var(--accent-ink)]"
+                  className="pop-in max-w-[92%] break-words whitespace-pre-wrap self-end rounded-[16px_16px_4px_16px] bg-[var(--accent)] px-[14px] py-[10px] text-[var(--accent-ink)] sm:max-w-[80%]"
                 >
                   {m.text}
                 </div>
@@ -671,17 +671,17 @@ export default function ChatClient() {
             return (
               <div
                 key={m.id}
-                className={`pop-in-left border-l-[3px] pl-[14px] ${
+                className={`pop-in-left min-w-0 border-l-[3px] pl-[14px] ${
                   m.role === "error" ? "border-[#c0392b] text-[#c0392b]" : "border-[var(--line)]"
                 }`}
               >
                 {m.role === "error" ? (
-                  <div className="whitespace-pre-wrap">{m.text}</div>
+                  <div className="whitespace-pre-wrap break-words">{m.text}</div>
                 ) : (
                   <>
                     {m.text ? (
                       <div
-                        className="select-text whitespace-pre-wrap"
+                        className="select-text whitespace-pre-wrap break-words"
                         dangerouslySetInnerHTML={{ __html: render(m.text) }}
                       />
                     ) : (
@@ -697,7 +697,7 @@ export default function ChatClient() {
       </main>
 
       <form
-        className="mx-auto flex w-full max-w-[760px] items-end gap-2.5 px-5 pb-2 pt-2"
+        className="mx-auto flex w-full max-w-[760px] items-end gap-2.5 px-4 pb-2 pt-2 sm:px-5"
         onSubmit={(e) => {
           e.preventDefault();
           submit();
@@ -735,7 +735,7 @@ export default function ChatClient() {
         </button>
       </form>
 
-      <footer className="mx-auto w-full max-w-[760px] border-t border-[var(--line)] px-5 pb-5 pt-3 text-center text-xs text-[var(--muted)]">
+      <footer className="mx-auto w-full max-w-[760px] border-t border-[var(--line)] px-4 pb-5 pt-3 text-center text-xs text-[var(--muted)] sm:px-5">
         Made by{" "}
         <a
           href="https://github.com/nobel-saputra/rulerz"
