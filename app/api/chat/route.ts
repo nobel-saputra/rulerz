@@ -1,3 +1,14 @@
+import { getModels } from "../../lib/models";
+import {
+  CONTEXT_LIMIT,
+  IMAGE_DATA_URL,
+  MAX_IMAGE_CHARS,
+  MAX_IMAGES,
+  MAX_PERSONA_CHARS,
+  MAX_TEXT_CHARS,
+  type ApiPart,
+} from "../../lib/shared";
+
 export const runtime = "nodejs";
 
 const KEY = process.env.OPENROUTER_API_KEY;
@@ -11,41 +22,28 @@ const RATE_LIMIT_PER_MIN = Number(process.env.RATE_LIMIT_PER_MIN || 20);
 
 const COOLDOWN_MS = 2 * 60 * 1000;
 const FIRST_TOKEN_TIMEOUT_MS = 20000;
-const MODELS_TTL_MS = 10 * 60 * 1000;
 
-/* ---------- daftar model gratis (cache 10 menit) ---------- */
-let modelCache: { at: number; ids: string[] } = { at: 0, ids: [] };
+/* ---------- kandidat model ---------- */
 const cooling = new Map<string, number>();
 
-async function getFreeModels(): Promise<string[]> {
-  if (modelCache.ids.length && Date.now() - modelCache.at < MODELS_TTL_MS) {
-    return modelCache.ids;
-  }
-  try {
-    const r = await fetch("https://openrouter.ai/api/v1/models");
-    const j = await r.json();
-    const ids: string[] = j.data
-      .filter(
-        (m: any) =>
-          m.id.endsWith(":free") &&
-          (m.architecture?.input_modalities || ["text"]).includes("text") &&
-          (m.architecture?.output_modalities || ["text"]).includes("text")
-      )
-      .sort((a: any, b: any) => (b.context_length || 0) - (a.context_length || 0))
-      .map((m: any) => m.id);
-    if (ids.length) modelCache = { at: Date.now(), ids };
-  } catch (e: any) {
-    console.error("Gagal ambil daftar model:", e.message);
-  }
-  return modelCache.ids;
-}
-
-async function buildCandidates(): Promise<string[]> {
-  const free = await getFreeModels();
-  const all = [...new Set([...PREFERRED, ...free])];
+async function buildCandidates(opts: {
+  chosen: string;
+  needVision: boolean;
+}): Promise<string[]> {
+  const { free, byId } = await getModels();
+  // Model pilihan user hanya diterima kalau ada di daftar gratis, dan selalu
+  // dicoba lebih dulu walau sedang cooldown (user memilihnya secara sadar).
+  const chosen =
+    free.some((m) => m.id === opts.chosen) && (!opts.needVision || byId.get(opts.chosen)?.vision)
+      ? [opts.chosen]
+      : [];
+  let all = [...new Set([...PREFERRED, ...free.map((m) => m.id)])].filter(
+    (id) => !chosen.includes(id)
+  );
+  if (opts.needVision) all = all.filter((id) => byId.get(id)?.vision);
   const now = Date.now();
   const ready = all.filter((id) => (cooling.get(id) || 0) < now);
-  return (ready.length ? ready : all).slice(0, MAX_TRIES);
+  return [...chosen, ...(ready.length ? ready : all)].slice(0, MAX_TRIES);
 }
 
 /* ---------- rate limit sederhana per IP ---------- */
@@ -69,7 +67,55 @@ if (typeof setInterval !== "undefined") {
 
 interface ChatMessage {
   role: "user" | "assistant" | "system";
-  content: string;
+  content: string | ApiPart[];
+}
+
+/* ---------- validasi pesan dari client ---------- */
+function sanitize(raw: unknown): { messages: ChatMessage[]; images: number } {
+  const list = Array.isArray(raw) ? raw.slice(-CONTEXT_LIMIT) : [];
+  const out: ChatMessage[] = [];
+  let images = 0;
+
+  // Dari pesan terbaru ke terlama, supaya batas gambar menyisakan yang terbaru.
+  for (let i = list.length - 1; i >= 0; i--) {
+    const m = list[i] as { role?: unknown; content?: unknown };
+    if (m?.role !== "user" && m?.role !== "assistant") continue;
+
+    if (typeof m.content === "string") {
+      if (m.content.trim()) {
+        out.unshift({ role: m.role, content: m.content.slice(0, MAX_TEXT_CHARS) });
+      }
+      continue;
+    }
+    if (m.role !== "user" || !Array.isArray(m.content)) continue;
+
+    let text = "";
+    const pics: ApiPart[] = [];
+    for (const p of m.content as Partial<ApiPart>[]) {
+      if (p?.type === "text" && typeof p.text === "string") {
+        text += p.text;
+      } else if (p?.type === "image_url") {
+        const url = p.image_url?.url;
+        if (
+          typeof url === "string" &&
+          url.length <= MAX_IMAGE_CHARS &&
+          IMAGE_DATA_URL.test(url) &&
+          images < MAX_IMAGES
+        ) {
+          pics.push({ type: "image_url", image_url: { url } });
+          images++;
+        }
+      }
+    }
+    text = text.slice(0, MAX_TEXT_CHARS);
+    if (!pics.length) {
+      if (text.trim()) out.unshift({ role: "user", content: text });
+      continue;
+    }
+    const parts: ApiPart[] = text.trim() ? [{ type: "text", text }, ...pics] : pics;
+    out.unshift({ role: "user", content: parts });
+  }
+  return { messages: out, images };
 }
 
 /* ---------- coba satu model; sukses kalau sudah ada token pertama ---------- */
@@ -141,26 +187,20 @@ export async function POST(req: Request) {
     );
   }
 
-  let body: any;
+  let body: { messages?: unknown; system?: unknown; model?: unknown };
   try {
     body = await req.json();
   } catch {
     return Response.json({ error: "Invalid request body." }, { status: 400 });
   }
 
-  const raw = Array.isArray(body?.messages) ? body.messages : [];
-  // Inject persona dari client (maks 800 karakter, cuma teks biasa)
+  // Inject persona dari client (maks 2000 karakter, cuma teks biasa)
   const persona =
-    typeof body?.system === "string" ? body.system.slice(0, 800).trim() : "";
-  const messages: ChatMessage[] = raw
-    .filter(
-      (m: any) =>
-        (m.role === "user" || m.role === "assistant") &&
-        typeof m.content === "string" &&
-        m.content.trim()
-    )
-    .slice(-20)
-    .map((m: any) => ({ role: m.role, content: m.content.slice(0, 8000) }));
+    typeof body?.system === "string"
+      ? body.system.slice(0, MAX_PERSONA_CHARS).trim()
+      : "";
+  const chosen = typeof body?.model === "string" ? body.model : "";
+  const { messages, images } = sanitize(body?.messages);
 
   if (!messages.length || messages[messages.length - 1].role !== "user") {
     return Response.json({ error: "Invalid message." }, { status: 400 });
@@ -171,17 +211,21 @@ export async function POST(req: Request) {
   const clientCtrl = new AbortController();
   req.signal.addEventListener("abort", () => clientCtrl.abort());
 
-  const candidates = await buildCandidates();
+  const candidates = await buildCandidates({ chosen, needVision: images > 0 });
   if (!candidates.length) {
     return Response.json(
-      { error: "The free model list is empty." },
+      {
+        error: images
+          ? "No free model that can read images is available right now. Remove the image or try again later."
+          : "The free model list is empty.",
+      },
       { status: 503 }
     );
   }
 
   let skipped = 0;
   for (const model of candidates) {
-    if (clientCtrl.signal.aborted) return new Response(null, { status: 499 as any });
+    if (clientCtrl.signal.aborted) return new Response(null, { status: 499 });
     try {
       const { reader, held } = await tryModel(model, messages, clientCtrl.signal);
 
@@ -215,9 +259,9 @@ export async function POST(req: Request) {
           "X-Models-Skipped": String(skipped),
         },
       });
-    } catch (e: any) {
-      if (clientCtrl.signal.aborted) return new Response(null, { status: 499 as any });
-      console.warn(`[skip] ${model}: ${e.message}`);
+    } catch (e) {
+      if (clientCtrl.signal.aborted) return new Response(null, { status: 499 });
+      console.warn(`[skip] ${model}: ${(e as Error).message}`);
       cooling.set(model, Date.now() + COOLDOWN_MS);
       skipped++;
     }
@@ -225,8 +269,7 @@ export async function POST(req: Request) {
 
   return Response.json(
     {
-      error:
-        "All free models are busy or unavailable. Please try again later.",
+      error: "All free models are busy or unavailable. Please try again later.",
     },
     { status: 503 }
   );

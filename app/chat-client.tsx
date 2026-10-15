@@ -1,174 +1,285 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState, type ClipboardEvent, type DragEvent } from "react";
 import Swal from "sweetalert2";
+import { Markdown } from "./components/markdown";
+import Sidebar from "./components/sidebar";
+import SetupScreen, { type ChatSettings } from "./components/setup-screen";
+import {
+  ClipIcon,
+  CopyIcon,
+  MenuIcon,
+  MicIcon,
+  PencilIcon,
+  PlusIcon,
+  RefreshIcon,
+  SpeakerIcon,
+  StopIcon,
+  XIcon,
+} from "./components/icons";
+import {
+  contextStartId,
+  createRecognition,
+  exportSession,
+  imageToDataUrl,
+  playPluk,
+  speak,
+  stopSpeaking,
+  toApiMessages,
+  ttsSupported,
+  type Recognition,
+} from "./lib/browser";
+import { buildSystemPrompt, langCode, personaLabel, SUGGESTIONS } from "./lib/personas";
+import { CONTEXT_LIMIT, MAX_IMAGE_CHARS, MAX_IMAGES, type ModelInfo } from "./lib/shared";
+import {
+  applyTheme,
+  loadPrefs,
+  loadSessions,
+  loadTheme,
+  nextId,
+  savePrefs,
+  readSessionList,
+  saveSessions,
+  SESSIONS_KEY,
+  titleFrom,
+  type Prefs,
+  type Session,
+  type Theme,
+  type UiMsg,
+} from "./lib/storage";
 
-interface ChatMsg {
-  role: "user" | "assistant";
-  content: string;
+const DEFAULT_SETTINGS: ChatSettings = {
+  personaKey: "",
+  persona: "",
+  lang: "English (US)",
+  codeLang: "",
+};
+
+const swal = Swal.mixin({
+  // Default-nya memaksa html/body height:auto, yang merusak layout tinggi penuh.
+  heightAuto: false,
+  background: "var(--panel)",
+  color: "var(--ink)",
+  confirmButtonColor: "var(--accent)",
+  cancelButtonColor: "var(--muted)",
+  reverseButtons: true,
+});
+
+function toast(title: string, icon: "error" | "warning" | "info" = "error") {
+  swal.fire({ toast: true, position: "top", icon, title, timer: 3500, showConfirmButton: false });
 }
 
-interface UiMsg {
-  id: string;
-  role: "user" | "bot" | "error";
-  text: string;
-  model?: string;
-  skipped?: number;
-  streaming?: boolean;
+function newSession(s: ChatSettings): Session {
+  return { id: nextId("chat"), title: "New chat", at: Date.now(), msgs: [], ...s };
 }
 
-let audioCtx: AudioContext | null = null;
-// Suara "pluk/tak" sederhana ala WhatsApp, tanpa file audio.
-function playPluk(pitch = 600) {
-  try {
-    audioCtx = audioCtx || new AudioContext();
-    const t = audioCtx.currentTime;
-    const osc = audioCtx.createOscillator();
-    const gain = audioCtx.createGain();
-    osc.type = "sine";
-    osc.frequency.setValueAtTime(pitch, t);
-    osc.frequency.exponentialRampToValueAtTime(pitch * 0.5, t + 0.09);
-    gain.gain.setValueAtTime(0.18, t);
-    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.12);
-    osc.connect(gain).connect(audioCtx.destination);
-    osc.start(t);
-    osc.stop(t + 0.13);
-  } catch {}
+function settingsOf(s: Session | null | undefined): ChatSettings {
+  if (!s) return DEFAULT_SETTINGS;
+  return { personaKey: s.personaKey, persona: s.persona, lang: s.lang, codeLang: s.codeLang };
 }
 
-function nextId(): string {
-  return "msg-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 9);
-}
-
-interface Session {
-  id: string;
-  title: string;
-  at: number;
-  msgs: UiMsg[];
-  history: ChatMsg[];
-  persona: string;
-  lang: string;
-  codeLang: string;
-}
-
-function esc(s: string): string {
-  return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string));
-}
-
-// Render sederhana: blok kode ``` dan `kode` inline, sisanya teks biasa.
-function render(text: string): string {
-  const parts = text.split("```");
-  return parts
-    .map((p, i) => {
-      if (i % 2 === 1) {
-        const body = p.replace(/^[^\n]*\n/, "");
-        return "<pre><code>" + esc(body.replace(/\n$/, "")) + "</code></pre>";
-      }
-      let out = esc(p)
-        .replace(/`([^`\n]+)`/g, "<code>$1</code>")
-        .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
-        .replace(/\*([^*\n]+)\*/g, "<em>$1</em>")
-        .replace(/^#{1,3}\s+(.+)$/gm, "<strong>$1</strong>");
-      return out;
-    })
-    .join("");
+/** Index pesan user terakhir sebelum (atau di) posisi idx. */
+function userIndexBefore(msgs: UiMsg[], idx: number): number {
+  for (let i = idx; i >= 0; i--) if (msgs[i].role === "user") return i;
+  return -1;
 }
 
 export default function ChatClient() {
-  const [msgs, setMsgs] = useState<UiMsg[]>([]);
+  const [boot] = useState(() => ({
+    stored: loadSessions(),
+    prefs: loadPrefs(),
+    theme: loadTheme(),
+  }));
+  const [sessions, setSessions] = useState<Session[]>(boot.stored.sessions);
+  const [activeId, setActiveId] = useState<string | null>(boot.stored.activeId);
+  const [started, setStarted] = useState(boot.stored.started);
+  const [prefs, setPrefs] = useState<Prefs>(boot.prefs);
+  const [theme, setTheme] = useState<Theme>(boot.theme);
+  const [models, setModels] = useState<ModelInfo[] | null>(null);
+
   const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [started, setStarted] = useState(false);
-  const [persona, setPersona] = useState("");
-  const [personaOpen, setPersonaOpen] = useState(false);
-  const [lang, setLang] = useState("English (US)");
-  const [codeLang, setCodeLang] = useState("");
-  const [showHistory, setShowHistory] = useState(false);
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const historyRef = useRef<ChatMsg[]>([]);
+  const [attachments, setAttachments] = useState<string[]>([]);
+  const [streamingId, setStreamingId] = useState<string | null>(null);
+  const [drawer, setDrawer] = useState(false);
+  const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [speakingId, setSpeakingId] = useState<string | null>(null);
+  const [listening, setListening] = useState(false);
+  const [lightbox, setLightbox] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const [canTalk] = useState(() => !!createRecognition());
+  const [canSpeak] = useState(() => ttsSupported());
+
   const controllerRef = useRef<AbortController | null>(null);
-  const scrollerRef = useRef<HTMLDivElement | null>(null);
-  const logRef = useRef<HTMLDivElement | null>(null);
+  const abortReasonRef = useRef<"user" | "switch">("user");
+  const scrollerRef = useRef<HTMLElement | null>(null);
+  const stickRef = useRef(true);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const recRef = useRef<Recognition | null>(null);
+  const latestRef = useRef({ sessions, activeId, started, streamingId: null as string | null });
+  const warnedFullRef = useRef(false);
+
+  const active = sessions.find((s) => s.id === activeId) || null;
+  const msgs = active?.msgs || [];
+  const busy = streamingId !== null;
+  const inChat = started && !!active;
 
   useEffect(() => {
-    scrollerRef.current?.scrollTo({ top: scrollerRef.current.scrollHeight });
-  }, [msgs]);
+    latestRef.current = { sessions, activeId, started, streamingId };
+  });
 
-  // Muat chat dari localStorage saat pertama dibuka
+  /* ---------- simpan ke localStorage (debounce) ---------- */
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem("rulerz-chat");
-      if (saved) {
-        const j = JSON.parse(saved);
-        if (Array.isArray(j.msgs)) {
-          setMsgs(j.msgs.map((m: UiMsg) => ({ ...m, streaming: false })));
-        }
-        if (Array.isArray(j.history)) historyRef.current = j.history;
-        if (j.started) setStarted(true);
-        if (typeof j.lang === "string" && j.lang) setLang(j.lang);
-        if (typeof j.persona === "string") setPersona(j.persona);
-        if (typeof j.codeLang === "string") setCodeLang(j.codeLang);
+    const t = setTimeout(() => {
+      if (!saveSessions({ sessions, activeId, started }) && !warnedFullRef.current) {
+        warnedFullRef.current = true;
+        toast("Browser storage is full. Delete some old chats so new ones can be saved.", "warning");
       }
-      const hist = localStorage.getItem("rulerz-history");
-      if (hist) {
-        const arr = JSON.parse(hist);
-        if (Array.isArray(arr)) setSessions(arr);
-      }
-    } catch {}
+    }, 400);
+    return () => clearTimeout(t);
+  }, [sessions, activeId, started]);
+
+  useEffect(() => {
+    const flush = () => saveSessions(latestRef.current);
+    // Tab lain mengubah riwayat: ambil versinya, tapi pertahankan sesi aktif
+    // yang masih kosong dan sesi yang sedang streaming di tab ini.
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== SESSIONS_KEY) return;
+      const incoming = readSessionList();
+      const { activeId: aid, streamingId: sid } = latestRef.current;
+      setSessions((local) => {
+        const keep = local.filter(
+          (s) =>
+            s.id === sid ||
+            (s.id === aid && !s.msgs.length && !incoming.some((x) => x.id === s.id))
+        );
+        return [...keep, ...incoming.filter((x) => !keep.some((k) => k.id === x.id))];
+      });
+    };
+    window.addEventListener("pagehide", flush);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      window.removeEventListener("storage", onStorage);
+    };
   }, []);
 
-  // Simpan chat ke localStorage setiap berubah
+  /* ---------- daftar model gratis ---------- */
   useEffect(() => {
-    try {
-      localStorage.setItem(
-        "rulerz-chat",
-        JSON.stringify({
-          msgs,
-          history: historyRef.current,
-          started,
-          lang,
-          persona,
-          codeLang,
-        })
-      );
-    } catch {}
-  }, [msgs, started, lang, persona, codeLang]);
+    let cancelled = false;
+    fetch("/api/models")
+      .then((r) => r.json())
+      .then((j: { models?: ModelInfo[] }) => {
+        if (!cancelled) setModels(Array.isArray(j.models) ? j.models : []);
+      })
+      .catch(() => {
+        if (!cancelled) setModels([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
-  // Tambahkan tombol "Copy" di setiap blok kode
+  // Model pilihan yang sudah tidak ada di daftar dianggap "Auto".
+  const chosenModel =
+    prefs.model && models && !models.some((m) => m.id === prefs.model) ? "" : prefs.model;
+
+  /* ---------- auto-scroll hanya kalau user ada di bawah ---------- */
   useEffect(() => {
-    if (!logRef.current) return;
-    logRef.current.querySelectorAll("pre").forEach((pre) => {
-      if (pre.querySelector("[data-copy-btn]")) return;
-      pre.style.position = "relative";
-      const btn = document.createElement("button");
-      btn.textContent = "Copy";
-      btn.setAttribute("data-copy-btn", "true");
-      btn.style.cssText =
-        "position:absolute;top:6px;right:6px;font-size:11px;padding:2px 8px;border-radius:6px;border:1px solid var(--line);background:var(--panel);color:var(--ink);cursor:pointer;";
-      btn.onclick = () => {
-        const text = pre.querySelector("code")?.innerText || pre.innerText;
-        navigator.clipboard.writeText(text).then(() => {
-          btn.textContent = "Copied!";
-          setTimeout(() => (btn.textContent = "Copy"), 1500);
-        });
-      };
-      pre.appendChild(btn);
+    const el = scrollerRef.current;
+    if (el && stickRef.current) el.scrollTo({ top: el.scrollHeight });
+  }, [active?.msgs, started, activeId]);
+
+  // Area chat mengecil (lampiran muncul, input membesar): tetap menempel di bawah.
+  useEffect(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      if (stickRef.current) el.scrollTop = el.scrollHeight;
     });
-  }, [msgs]);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [inChat]);
 
-  const isProgrammer = persona.includes("expert programmer");
+  /* ---------- tinggi textarea mengikuti isi ---------- */
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    // scrollHeight tidak termasuk border, jadi tambahkan selisihnya.
+    const border = el.offsetHeight - el.clientHeight;
+    el.style.height = Math.min(el.scrollHeight + border, 180) + "px";
+  }, [input, started]);
 
-  async function ask(text: string) {
-    playPluk(520); // sound when sending
-    const userMsg: UiMsg = { id: nextId(), role: "user", text };
-    const botMsg: UiMsg = { id: nextId(), role: "bot", text: "", streaming: true };
-    setMsgs((m) => [...m, userMsg, botMsg]);
-    historyRef.current = [...historyRef.current, { role: "user", content: text }];
+  // Escape menutup drawer & pratinjau gambar.
+  useEffect(() => {
+    if (!drawer && !lightbox) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setDrawer(false);
+      setLightbox(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [drawer, lightbox]);
+
+  // Hentikan suara & mic saat komponen dilepas.
+  useEffect(
+    () => () => {
+      stopSpeaking();
+      recRef.current?.stop();
+    },
+    []
+  );
+
+  /* ---------- helper state ---------- */
+  function patchSession(id: string, fn: (s: Session) => Session) {
+    setSessions((list) => list.map((s) => (s.id === id ? fn(s) : s)));
+  }
+
+  function setMsgsOf(id: string, fn: (m: UiMsg[]) => UiMsg[]) {
+    patchSession(id, (s) => {
+      const next = fn(s.msgs);
+      return { ...s, msgs: next, title: s.renamed ? s.title : titleFrom(next) };
+    });
+  }
+
+  function updateMsg(sid: string, mid: string, patch: Partial<UiMsg>) {
+    setMsgsOf(sid, (m) => m.map((x) => (x.id === mid ? { ...x, ...patch } : x)));
+  }
+
+  function stopStreaming(reason: "user" | "switch") {
+    if (!controllerRef.current) return;
+    abortReasonRef.current = reason;
+    controllerRef.current.abort();
+  }
+
+  function focusInput() {
+    if (window.matchMedia("(pointer: fine)").matches) inputRef.current?.focus();
+  }
+
+  /* ---------- kirim & stream jawaban ---------- */
+  async function run(session: Session, base: UiMsg[], fresh?: UiMsg) {
+    const sid = session.id;
+    const botMsg: UiMsg = {
+      id: nextId(),
+      role: "bot",
+      text: "",
+      wanted: chosenModel || undefined,
+      streaming: true,
+    };
+    patchSession(sid, (s) => ({ ...s, at: Date.now() }));
+    setMsgsOf(sid, () => [...base, botMsg]);
+    stickRef.current = true;
+    stopSpeaking();
+    setSpeakingId(null);
+    if (prefs.sound) playPluk(520); // sound when sending
 
     const controller = new AbortController();
     controllerRef.current = controller;
-    setBusy(true);
+    abortReasonRef.current = "user";
+    setStreamingId(sid);
 
     let answer = "";
     try {
@@ -176,17 +287,9 @@ export default function ChatClient() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          messages: historyRef.current,
-          system:
-            (persona
-              ? persona
-              : "You are a helpful AI assistant.") +
-            ` Always respond in ${lang}, unless the user explicitly asks you to use another language.` +
-            (isProgrammer
-              ? codeLang
-                ? ` The user's preferred programming language is ${codeLang}. When they ask for code without specifying a language and this is the first coding request, briefly confirm that this is the language they want; for later requests just answer directly.`
-                : " You are strong at programming. When the user asks for code (e.g. 'write hello world') and this is the first coding request in the conversation, ALWAYS first ask which programming language they want to use instead of writing code right away — but only for that first coding request. After they answer, remember it and don't keep asking."
-              : ""),
+          messages: toApiMessages(base),
+          system: buildSystemPrompt(session),
+          model: chosenModel || undefined,
         }),
         signal: controller.signal,
       });
@@ -201,9 +304,7 @@ export default function ChatClient() {
 
       const model = res.headers.get("X-Model-Used") || "";
       const skipped = Number(res.headers.get("X-Models-Skipped") || 0);
-      setMsgs((m) =>
-        m.map((x) => (x.id === botMsg.id ? { ...x, model, skipped } : x))
-      );
+      updateMsg(sid, botMsg.id, { model, skipped });
 
       const reader = res.body!.getReader();
       const dec = new TextDecoder();
@@ -219,342 +320,759 @@ export default function ChatClient() {
           if (!line.startsWith("data:")) continue;
           const data = line.slice(5).trim();
           if (!data || data === "[DONE]") continue;
+          let j: { error?: { message?: string }; choices?: { delta?: { content?: string } }[] };
           try {
-            const j = JSON.parse(data);
-            if (j.error) throw new Error(j.error.message || "The model stopped mid-reply.");
-            const delta = j.choices?.[0]?.delta?.content;
-            if (delta) {
-              if (!answer) playPluk(880); // sound when the reply starts
-              answer += delta;
-              setMsgs((m) =>
-                m.map((x) => (x.id === botMsg.id ? { ...x, text: answer } : x))
-              );
-            }
-          } catch (e: any) {
-            if (e.message && !(e instanceof SyntaxError)) throw e;
+            j = JSON.parse(data);
+          } catch {
+            continue;
+          }
+          if (j.error) throw new Error(j.error.message || "The model stopped mid-reply.");
+          const delta = j.choices?.[0]?.delta?.content;
+          if (delta) {
+            if (!answer && prefs.sound) playPluk(880); // sound when the reply starts
+            answer += delta;
+            updateMsg(sid, botMsg.id, { text: answer });
           }
         }
       }
-      if (answer) {
-        historyRef.current = [...historyRef.current, { role: "assistant", content: answer }];
-      } else {
-        setMsgs((m) =>
-          m.map((x) => (x.id === botMsg.id ? { ...x, text: "(the model didn't send a reply)" } : x))
-        );
-      }
-    } catch (e: any) {
-      if (e.name === "AbortError") {
-        if (answer) {
-          historyRef.current = [...historyRef.current, { role: "assistant", content: answer }];
-        } else {
-          setMsgs((m) => m.filter((x) => x.id !== botMsg.id && x.id !== userMsg.id));
-          historyRef.current = historyRef.current.slice(0, -1);
+      if (!answer) updateMsg(sid, botMsg.id, { text: "(the model didn't send a reply)" });
+    } catch (e) {
+      const err = e as Error;
+      if (err.name === "AbortError") {
+        if (!answer) {
+          const restore = fresh && abortReasonRef.current === "user";
+          setMsgsOf(sid, (m) =>
+            m.filter((x) => x.id !== botMsg.id && !(restore && x.id === fresh.id))
+          );
+          if (restore) {
+            // Kembalikan pesan ke kotak input supaya bisa diedit.
+            setInput((cur) => cur || fresh.text);
+            setAttachments((cur) => (cur.length ? cur : fresh.images || []));
+          }
         }
       } else {
-        if (!answer) historyRef.current = historyRef.current.slice(0, -1);
-        setMsgs((m) =>
-          m.map((x) =>
-            x.id === botMsg.id ? { ...x, role: "error", text: e.message } : x
-          )
-        );
+        const text =
+          err instanceof TypeError ? "Network error. Check your connection and try again." : err.message;
+        if (answer) {
+          // Simpan jawaban yang sudah masuk, tampilkan error di bawahnya.
+          setMsgsOf(sid, (m) => [
+            ...m.map((x) => (x.id === botMsg.id ? { ...x, streaming: false } : x)),
+            { id: nextId(), role: "error", text: "The reply was cut off: " + text },
+          ]);
+        } else {
+          updateMsg(sid, botMsg.id, { role: "error", text });
+        }
       }
     } finally {
-      setMsgs((m) =>
-        m.map((x) => (x.id === botMsg.id ? { ...x, streaming: false } : x))
-      );
-      controllerRef.current = null;
-      setBusy(false);
-      inputRef.current?.focus();
+      updateMsg(sid, botMsg.id, { streaming: false });
+      if (controllerRef.current === controller) {
+        controllerRef.current = null;
+        setStreamingId(null);
+      }
+      focusInput();
     }
+  }
+
+  function ask(text: string, images: string[] = []) {
+    if (!active || busy) return;
+    const userMsg: UiMsg = {
+      id: nextId(),
+      role: "user",
+      text,
+      images: images.length ? images : undefined,
+    };
+    run(active, [...active.msgs, userMsg], userMsg);
   }
 
   function submit() {
-    if (controllerRef.current) {
-      controllerRef.current.abort();
+    if (busy) {
+      stopStreaming("user");
       return;
     }
     const text = input.trim();
-    if (!text) return;
+    if (!text && !attachments.length) return;
+    recRef.current?.stop();
     setInput("");
-    if (inputRef.current) inputRef.current.style.height = "auto";
-    ask(text);
+    setAttachments([]);
+    ask(text, attachments);
   }
 
-  const historyOverlay =
-    showHistory && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-6"
-          onClick={() => setShowHistory(false)}
+  function retry(errorId: string) {
+    if (!active || busy) return;
+    const idx = active.msgs.findIndex((m) => m.id === errorId);
+    const u = userIndexBefore(active.msgs, idx);
+    if (u < 0) return;
+    run(active, active.msgs.slice(0, u + 1));
+  }
+
+  function regenerate(botId: string) {
+    retry(botId);
+  }
+
+  function saveEdit() {
+    if (!active || busy || !editing) return;
+    const idx = active.msgs.findIndex((m) => m.id === editing.id);
+    const old = active.msgs[idx];
+    const text = editing.text.trim();
+    setEditing(null);
+    if (!old || (!text && !old.images?.length) || text === old.text) return;
+    run(active, [...active.msgs.slice(0, idx), { ...old, text }]);
+  }
+
+  function copy(m: UiMsg) {
+    navigator.clipboard.writeText(m.text).then(() => {
+      setCopiedId(m.id);
+      setTimeout(() => setCopiedId((c) => (c === m.id ? null : c)), 1500);
+    });
+  }
+
+  function toggleSpeak(m: UiMsg) {
+    if (speakingId === m.id) {
+      stopSpeaking();
+      setSpeakingId(null);
+      return;
+    }
+    setSpeakingId(m.id);
+    speak(m.text, langCode(active?.lang || ""), () =>
+      setSpeakingId((c) => (c === m.id ? null : c))
+    );
+  }
+
+  /* ---------- sesi ---------- */
+  function leaveCurrent() {
+    stopStreaming("switch");
+    stopSpeaking();
+    setSpeakingId(null);
+    setEditing(null);
+    recRef.current?.stop();
+    stickRef.current = true;
+  }
+
+  function startChat(s: ChatSettings) {
+    leaveCurrent();
+    const fresh = newSession(s);
+    // Sesi kosong yang sedang aktif diganti, bukan ditumpuk.
+    setSessions((list) => [fresh, ...list.filter((x) => x.msgs.length || x.id !== activeId)]);
+    setActiveId(fresh.id);
+    setStarted(true);
+    setDrawer(false);
+    focusInput();
+  }
+
+  function newChat() {
+    if (active && !active.msgs.length && started) {
+      setDrawer(false);
+      focusInput();
+      return;
+    }
+    startChat(settingsOf(active || sessions[0]));
+  }
+
+  function selectSession(id: string) {
+    if (id !== activeId) leaveCurrent();
+    setActiveId(id);
+    setStarted(true);
+    setDrawer(false);
+  }
+
+  function renameSession(id: string, title: string) {
+    patchSession(id, (s) => ({ ...s, title, renamed: true }));
+  }
+
+  async function deleteSession(id: string) {
+    const r = await swal.fire({
+      title: "Delete this chat?",
+      text: "This can't be undone.",
+      icon: "warning",
+      showCancelButton: true,
+      confirmButtonText: "Delete",
+      confirmButtonColor: "var(--danger)",
+    });
+    if (!r.isConfirmed) return;
+    if (id === activeId) {
+      leaveCurrent();
+      if (started) {
+        const fresh = newSession(settingsOf(active));
+        setSessions((list) => [fresh, ...list.filter((x) => x.id !== id)]);
+        setActiveId(fresh.id);
+        return;
+      }
+      setActiveId(null);
+    }
+    setSessions((list) => list.filter((x) => x.id !== id));
+  }
+
+  async function exportChat(id: string) {
+    const s = sessions.find((x) => x.id === id);
+    if (!s) return;
+    const r = await swal.fire({
+      title: "Export chat",
+      text: "Choose a file format.",
+      showDenyButton: true,
+      showCancelButton: true,
+      confirmButtonText: "Markdown (.md)",
+      denyButtonText: "Plain text (.txt)",
+      denyButtonColor: "var(--accent)",
+    });
+    if (r.isConfirmed) exportSession(s, "md");
+    else if (r.isDenied) exportSession(s, "txt");
+  }
+
+  async function goToMenu() {
+    const r = await swal.fire({
+      title: "Back to the main menu?",
+      text: "This chat is saved in History, so you can come back to it anytime.",
+      showCancelButton: true,
+      confirmButtonText: "Go to menu",
+      cancelButtonText: "Stay",
+    });
+    if (r.isConfirmed) {
+      leaveCurrent();
+      setStarted(false);
+    }
+  }
+
+  /* ---------- preferensi ---------- */
+  function updatePrefs(patch: Partial<Prefs>) {
+    setPrefs((p) => {
+      const next = { ...p, ...patch };
+      savePrefs(next);
+      return next;
+    });
+  }
+
+  function changeTheme(t: Theme) {
+    setTheme(t);
+    applyTheme(t);
+  }
+
+  /* ---------- lampiran gambar ---------- */
+  async function addFiles(files: File[]) {
+    const imgs = files.filter((f) => f.type.startsWith("image/"));
+    if (!imgs.length) {
+      if (files.length) toast("Only image files can be attached.");
+      return;
+    }
+    const room = MAX_IMAGES - attachments.length;
+    if (room <= 0) {
+      toast(`You can attach up to ${MAX_IMAGES} images.`, "warning");
+      return;
+    }
+    if (imgs.length > room) toast(`Only ${room} more image(s) can be attached.`, "warning");
+    const out: string[] = [];
+    for (const f of imgs.slice(0, room)) {
+      try {
+        const url = await imageToDataUrl(f);
+        if (url.length > MAX_IMAGE_CHARS) toast(`"${f.name}" is too large.`);
+        else out.push(url);
+      } catch {
+        toast(`Couldn't read "${f.name}".`);
+      }
+    }
+    if (out.length) setAttachments((a) => [...a, ...out].slice(0, MAX_IMAGES));
+  }
+
+  function onPaste(e: ClipboardEvent<HTMLTextAreaElement>) {
+    const files = Array.from(e.clipboardData.files).filter((f) => f.type.startsWith("image/"));
+    if (files.length) {
+      e.preventDefault();
+      addFiles(files);
+    }
+  }
+
+  function onDrop(e: DragEvent) {
+    e.preventDefault();
+    setDragOver(false);
+    addFiles(Array.from(e.dataTransfer.files));
+  }
+
+  /* ---------- input suara ---------- */
+  function toggleMic() {
+    if (listening) {
+      recRef.current?.stop();
+      return;
+    }
+    const rec = createRecognition();
+    if (!rec) return;
+    recRef.current = rec;
+    rec.lang = langCode(active?.lang || "");
+    rec.continuous = true;
+    rec.interimResults = true;
+    const base = input ? input.replace(/\s*$/, " ") : "";
+    let finalText = "";
+    rec.onresult = (e) => {
+      let interim = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const r = e.results[i];
+        if (r.isFinal) finalText += r[0].transcript;
+        else interim += r[0].transcript;
+      }
+      setInput(base + finalText + interim);
+    };
+    rec.onerror = (e) => {
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+        toast("Microphone access was blocked. Allow it in your browser settings.");
+      } else if (e.error !== "no-speech" && e.error !== "aborted") {
+        toast("Voice input stopped: " + e.error);
+      }
+    };
+    rec.onend = () => {
+      setListening(false);
+      if (recRef.current === rec) recRef.current = null;
+    };
+    try {
+      rec.start();
+      setListening(true);
+    } catch {
+      setListening(false);
+    }
+  }
+
+  /* ---------- tampilan ---------- */
+  const sorted = [...sessions].sort((a, b) => b.at - a.at);
+  const sidebarProps = {
+    sessions: sorted,
+    activeId,
+    inChat: started,
+    onSelect: selectSession,
+    onNew: newChat,
+    onRename: renameSession,
+    onDelete: deleteSession,
+    onExport: exportChat,
+    theme,
+    onTheme: changeTheme,
+    sound: prefs.sound,
+    onSound: (on: boolean) => updatePrefs({ sound: on }),
+  };
+
+  const drawerEl = drawer && (
+    <div
+      className={`fixed inset-0 z-50 flex bg-black/40 ${inChat ? "lg:hidden" : ""}`}
+      onClick={() => setDrawer(false)}
+      role="presentation"
+    >
+      <div
+        className="slide-in h-full w-[300px] max-w-[85vw] shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-label="Chat history"
+      >
+        <Sidebar {...sidebarProps} onClose={() => setDrawer(false)} />
+      </div>
+    </div>
+  );
+
+  if (!inChat || !active) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+        <SetupScreen
+          initial={settingsOf(active || sorted[0])}
+          customPersona={prefs.customPersona}
+          onCustomPersona={(t) => updatePrefs({ customPersona: t })}
+          onStart={startChat}
+          onOpenHistory={() => setDrawer(true)}
+        />
+        {drawerEl}
+      </div>
+    );
+  }
+
+  const ctxStart = contextStartId(msgs);
+  const lastId = msgs[msgs.length - 1]?.id;
+  const visionModels = models?.filter((m) => m.vision) || [];
+  const chosenInfo = models?.find((m) => m.id === chosenModel);
+  const modelName = (id: string) =>
+    models?.find((m) => m.id === id)?.name || id.replace(/^[^/]+\//, "").replace(/:free$/, "");
+
+  return (
+    <div className="flex min-h-0 flex-1">
+      <aside className="hidden w-[280px] shrink-0 border-r border-[var(--line)] lg:block">
+        <Sidebar {...sidebarProps} />
+      </aside>
+
+      <div className="flex min-w-0 flex-1 flex-col">
+        <header className="mx-auto flex w-full max-w-[760px] items-center gap-2 px-4 pb-3 pt-4 sm:px-5">
+          <button
+            type="button"
+            className="icon-btn lg:hidden"
+            aria-label="Open chat history"
+            onClick={() => setDrawer(true)}
+          >
+            <MenuIcon />
+          </button>
+          <button
+            type="button"
+            className="min-w-0 flex-1 text-left transition hover:opacity-70"
+            onClick={goToMenu}
+            title="Back to the main menu"
+          >
+            <span className="block font-[var(--display)] text-2xl font-bold leading-tight tracking-tight sm:text-[1.6rem]">
+              Rulerz
+            </span>
+            <span className="block truncate text-xs text-[var(--muted)]">
+              {personaLabel(active.personaKey)} · {active.lang}
+              {active.codeLang ? ` · ${active.codeLang}` : ""}
+            </span>
+          </button>
+          <select
+            value={chosenModel}
+            onChange={(e) => updatePrefs({ model: e.target.value })}
+            aria-label="Model"
+            title="Model (Auto picks the best available free model)"
+            className="w-[130px] shrink-0 truncate rounded-lg border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5 text-sm text-[var(--ink)] sm:w-[210px]"
+          >
+            <option value="">Auto</option>
+            {models === null && <option disabled>Loading models…</option>}
+            {models?.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+                {m.vision ? " · images" : ""}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="icon-btn shrink-0"
+            onClick={newChat}
+            aria-label="New chat"
+            title="New chat"
+          >
+            <PlusIcon />
+            <span className="ml-1.5 hidden text-sm sm:inline">New chat</span>
+          </button>
+        </header>
+
+        <main
+          ref={scrollerRef}
+          className="min-h-0 w-full flex-1 overflow-y-auto"
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+          }}
         >
           <div
-            className="pop-in w-full max-w-[480px] rounded-2xl bg-[var(--panel)] p-6 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
+            className="mx-auto flex max-w-[760px] flex-col gap-[22px] px-4 pb-6 pt-2 sm:px-5"
+            aria-live="polite"
           >
-            <h2 className="mb-4 font-[var(--display)] text-xl font-bold text-[var(--ink)]">
-              Chat history
-            </h2>
-            {sessions.length === 0 ? (
-              <p className="text-[var(--muted)]">No saved chats yet.</p>
-            ) : (
-              <div className="flex max-h-[50vh] flex-col gap-2 overflow-y-auto">
-                {sessions.map((s) => (
-                  <div
-                    key={s.id}
-                    className="flex items-center justify-between gap-3 rounded-xl border border-[var(--line)] bg-[var(--bg)] px-4 py-3"
-                  >
+            {msgs.length === 0 && (
+              <div className="mt-[8vh]">
+                <strong className="mb-1.5 block font-[var(--display)] text-[1.25rem] text-[var(--ink)]">
+                  Start chatting.
+                </strong>
+                <p className="mb-4 max-w-[46ch] text-[var(--muted)]">
+                  Ask anything, or try one of these:
+                </p>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {(SUGGESTIONS[active.personaKey] || SUGGESTIONS[""]).map((s) => (
                     <button
+                      key={s}
                       type="button"
-                      className="flex-1 text-left"
-                      onClick={() => {
-                        setMsgs(s.msgs.map((m) => ({ ...m, streaming: false })));
-                        historyRef.current = s.history;
-                        setPersona(s.persona);
-                        setLang(s.lang);
-                        setCodeLang(s.codeLang);
-                        setStarted(true);
-                        setShowHistory(false);
-                        // pindahkan ke chat aktif: hapus dari history agar tidak dobel
-                        const updated = sessions.filter((x) => x.id !== s.id);
-                        setSessions(updated);
-                        try {
-                          localStorage.setItem(
-                            "rulerz-history",
-                            JSON.stringify(updated)
-                          );
-                        } catch {}
-                      }}
+                      onClick={() => ask(s)}
+                      className="pop-in-left rounded-xl border border-[var(--line)] bg-[var(--panel)] px-4 py-3 text-left text-sm text-[var(--ink)] transition hover:border-[var(--accent)]"
                     >
-                      <div className="truncate font-semibold text-[var(--ink)]">
-                        {s.title}
-                      </div>
-                      <div className="text-xs text-[var(--muted)]">
-                        {new Date(s.at).toLocaleString()}
-                      </div>
+                      {s}
                     </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {msgs.map((m) => {
+              const divider = m.id === ctxStart && (
+                <div
+                  className="flex items-center gap-3 text-xs text-[var(--muted)]"
+                  role="note"
+                >
+                  <span className="h-px flex-1 bg-[var(--line)]" />
+                  <span className="text-center">
+                    Messages above are outside the model&apos;s memory (it sees the last{" "}
+                    {CONTEXT_LIMIT})
+                  </span>
+                  <span className="h-px flex-1 bg-[var(--line)]" />
+                </div>
+              );
+
+              if (m.role === "user") {
+                const isEditing = editing?.id === m.id;
+                return (
+                  <Fragment key={m.id}>
+                  {divider}
+                  <div key={m.id} className="group flex flex-col items-end gap-1">
+                    {isEditing ? (
+                      <div className="w-full max-w-[92%] sm:max-w-[80%]">
+                        <textarea
+                          autoFocus
+                          value={editing.text}
+                          onChange={(e) => setEditing({ id: m.id, text: e.target.value })}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                              e.preventDefault();
+                              saveEdit();
+                            }
+                            if (e.key === "Escape") setEditing(null);
+                          }}
+                          rows={Math.min(8, editing.text.split("\n").length + 1)}
+                          aria-label="Edit message"
+                          className="w-full resize-y rounded-xl border border-[var(--accent)] bg-[var(--panel)] px-[14px] py-[10px] text-[var(--ink)]"
+                        />
+                        <div className="mt-1.5 flex justify-end gap-2">
+                          <button type="button" className="ghost text-sm" onClick={() => setEditing(null)}>
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            onClick={saveEdit}
+                            className="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm font-semibold text-[var(--accent-ink)]"
+                          >
+                            Save &amp; send
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="pop-in max-w-[92%] break-words whitespace-pre-wrap rounded-[16px_16px_4px_16px] bg-[var(--accent)] px-[14px] py-[10px] text-[var(--accent-ink)] sm:max-w-[80%]">
+                        {!!m.images?.length && (
+                          <div className={`flex flex-wrap gap-1.5 ${m.text ? "mb-2" : ""}`}>
+                            {m.images.map((src, i) => (
+                              <button
+                                key={i}
+                                type="button"
+                                onClick={() => setLightbox(src)}
+                                aria-label="View image"
+                              >
+                                {/* eslint-disable-next-line @next/next/no-img-element -- data URL lokal */}
+                                <img
+                                  src={src}
+                                  alt=""
+                                  className="h-24 w-24 rounded-lg object-cover sm:h-32 sm:w-32"
+                                />
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        {!!m.imagesLost && (
+                          <div className={`text-xs opacity-80 ${m.text ? "mb-1" : ""}`}>
+                            [{m.imagesLost} image(s) not kept — browser storage was full]
+                          </div>
+                        )}
+                        {m.text}
+                      </div>
+                    )}
+                    {!isEditing && (
+                      <div className="flex gap-1 opacity-100 transition-opacity sm:opacity-0 sm:group-focus-within:opacity-100 sm:group-hover:opacity-100">
+                        <button type="button" className="msg-action inline-flex items-center gap-1" onClick={() => copy(m)}>
+                          <CopyIcon width={13} height={13} />
+                          {copiedId === m.id ? "Copied!" : "Copy"}
+                        </button>
+                        <button
+                          type="button"
+                          className="msg-action inline-flex items-center gap-1"
+                          disabled={busy}
+                          onClick={() => setEditing({ id: m.id, text: m.text })}
+                        >
+                          <PencilIcon width={13} height={13} /> Edit
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                  </Fragment>
+                );
+              }
+
+              if (m.role === "error") {
+                return (
+                  <Fragment key={m.id}>
+                  {divider}
+                  <div key={m.id} className="pop-in-left min-w-0 border-l-[3px] border-[var(--danger)] pl-[14px] text-[var(--danger)]">
+                    <div className="whitespace-pre-wrap break-words">{m.text}</div>
+                    {m.id === lastId && !busy && (
+                      <button
+                        type="button"
+                        onClick={() => retry(m.id)}
+                        className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 text-sm font-semibold text-[var(--ink)]"
+                      >
+                        <RefreshIcon width={14} height={14} /> Retry
+                      </button>
+                    )}
+                  </div>
+                  </Fragment>
+                );
+              }
+
+              return (
+                <Fragment key={m.id}>
+                {divider}
+                <div key={m.id} className="group pop-in-left min-w-0 border-l-[3px] border-[var(--line)] pl-[14px]">
+                  {m.text ? <Markdown text={m.text} /> : <div className="dots" />}
+                  {m.streaming && m.text && <span className="dots" />}
+                  {!m.streaming && m.text && (
+                    <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                      <button type="button" className="msg-action inline-flex items-center gap-1" onClick={() => copy(m)}>
+                        <CopyIcon width={13} height={13} />
+                        {copiedId === m.id ? "Copied!" : "Copy"}
+                      </button>
+                      {canSpeak && (
+                        <button
+                          type="button"
+                          className="msg-action inline-flex items-center gap-1"
+                          onClick={() => toggleSpeak(m)}
+                          aria-pressed={speakingId === m.id}
+                        >
+                          {speakingId === m.id ? (
+                            <>
+                              <StopIcon width={13} height={13} /> Stop
+                            </>
+                          ) : (
+                            <>
+                              <SpeakerIcon width={13} height={13} /> Listen
+                            </>
+                          )}
+                        </button>
+                      )}
+                      {m.id === lastId && !busy && (
+                        <button
+                          type="button"
+                          className="msg-action inline-flex items-center gap-1"
+                          onClick={() => regenerate(m.id)}
+                        >
+                          <RefreshIcon width={13} height={13} /> Regenerate
+                        </button>
+                      )}
+                      {m.model && (
+                        <span className="ml-1 text-[0.72rem] text-[var(--muted)]" title={m.model}>
+                          via {modelName(m.model)}
+                          {m.wanted && m.wanted !== m.model
+                            ? ` · ${modelName(m.wanted)} was unavailable`
+                            : m.skipped
+                              ? ` · ${m.skipped} busy model${m.skipped > 1 ? "s" : ""} skipped`
+                              : ""}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+                </Fragment>
+              );
+            })}
+          </div>
+        </main>
+
+        <form
+          className={`mx-auto w-full max-w-[760px] px-4 pb-2 pt-2 sm:px-5 ${
+            dragOver ? "rounded-xl outline-2 outline-dashed outline-[var(--accent)]" : ""
+          }`}
+          onSubmit={(e) => {
+            e.preventDefault();
+            submit();
+          }}
+          onDragOver={(e) => {
+            if (e.dataTransfer.types.includes("Files")) {
+              e.preventDefault();
+              setDragOver(true);
+            }
+          }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={onDrop}
+        >
+          {attachments.length > 0 && (
+            <div className="mb-2">
+              <div className="flex flex-wrap gap-2">
+                {attachments.map((src, i) => (
+                  <div key={i} className="relative">
+                    {/* eslint-disable-next-line @next/next/no-img-element -- data URL lokal */}
+                    <img
+                      src={src}
+                      alt={`Attachment ${i + 1}`}
+                      className="h-16 w-16 rounded-lg border border-[var(--line)] object-cover"
+                    />
                     <button
                       type="button"
-                      aria-label="Delete"
-                      className="ghost"
-                      onClick={() => {
-                        const updated = sessions.filter((x) => x.id !== s.id);
-                        setSessions(updated);
-                        try {
-                          localStorage.setItem(
-                            "rulerz-history",
-                            JSON.stringify(updated)
-                          );
-                        } catch {}
-                      }}
+                      aria-label={`Remove attachment ${i + 1}`}
+                      onClick={() => setAttachments((a) => a.filter((_, j) => j !== i))}
+                      className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-[var(--ink)] text-[var(--bg)]"
                     >
-                      ✕
+                      <XIcon width={12} height={12} />
                     </button>
                   </div>
                 ))}
               </div>
-            )}
-          </div>
-        </div>
-    );
+              <p className="mt-1 text-xs text-[var(--muted)]">
+                {models && visionModels.length === 0
+                  ? "No free model can read images right now — sending may fail."
+                  : chosenInfo && !chosenInfo.vision
+                    ? "The selected model can't read images, so a model that can will answer instead."
+                    : "A model that can read images will answer."}
+              </p>
+            </div>
+          )}
 
-  if (!started) {
-    const personas = [
-      {
-        key: "teacher",
-        label: "Teacher",
-        prompt:
-          "You are a patient and encouraging teacher. Explain concepts clearly, use simple examples, and help the user learn step by step.",
-      },
-      {
-        key: "programmer",
-        label: "Programmer",
-        prompt:
-          "You are an expert programmer. Give clear, practical coding help with examples, debug issues, and explain technical concepts concisely.",
-      },
-      {
-        key: "partner",
-        label: "Partner",
-        prompt: "",
-      },
-      {
-        key: "friend",
-        label: "Friend",
-        prompt:
-          "You are the user's close friend. Be casual, fun, honest, and supportive.",
-      },
-    ];
-    const partnerOptions = [
-      {
-        key: "girlfriend",
-        label: "Girlfriend",
-        prompt:
-          "You are the user's caring girlfriend. Be warm, affectionate, supportive, and sweetly playful.",
-      },
-      {
-        key: "boyfriend",
-        label: "Boyfriend",
-        prompt:
-          "You are the user's caring boyfriend. Be warm, supportive, attentive, and playful in a sweet way.",
-      },
-    ];
-
-    const languages = [
-      "English (US)",
-      "English (UK)",
-      "Indonesian",
-      "Spanish",
-      "French",
-      "German",
-      "Japanese",
-      "Mandarin",
-      "Korean",
-      "Arabic",
-    ];
-
-    const codingLanguages = [
-      "TypeScript",
-      "JavaScript",
-      "Python",
-      "Java",
-      "C++",
-      "C#",
-      "Go",
-      "Rust",
-      "PHP",
-      "Kotlin",
-    ];
-
-    return (
-      <div className="flex min-h-full flex-1 flex-col items-center justify-center gap-5 px-4 py-8 text-center sm:px-6">
-        <h1 className="font-[var(--display)] text-3xl font-bold tracking-tight sm:text-4xl">Rulerz</h1>
-        <p className="max-w-[46ch] text-[var(--muted)]">
-          Your AI assistant. Pick a personality and a response language, then start chatting.
-        </p>
-
-        <div className="grid w-full max-w-[420px] grid-cols-2 gap-3">
-          {personas.map((p) => (
+          <div className="flex items-end gap-2">
+            <input
+              ref={fileRef}
+              type="file"
+              accept="image/*"
+              multiple
+              hidden
+              onChange={(e) => {
+                addFiles(Array.from(e.target.files || []));
+                e.target.value = "";
+              }}
+            />
             <button
-              key={p.key}
               type="button"
-              onClick={() => {
-                if (p.key === "partner") {
-                  setPersonaOpen(true);
-                  setPersona("");
-                } else {
-                  setPersonaOpen(false);
-                  setPersona(p.prompt);
+              className="icon-btn h-[46px] shrink-0"
+              aria-label="Attach image"
+              title="Attach image"
+              disabled={attachments.length >= MAX_IMAGES}
+              onClick={() => fileRef.current?.click()}
+            >
+              <ClipIcon />
+            </button>
+            <textarea
+              ref={inputRef}
+              rows={1}
+              value={input}
+              placeholder={listening ? "Listening…" : "Type a message, Enter to send"}
+              aria-label="Message"
+              className="max-h-[180px] min-w-0 flex-1 resize-none rounded-xl border border-[var(--line)] bg-[var(--panel)] px-[14px] py-[11px] text-[var(--ink)]"
+              onChange={(e) => setInput(e.target.value)}
+              onPaste={onPaste}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  submit();
                 }
               }}
-              className={`rounded-xl border px-4 py-3 font-semibold transition ${
-                (p.key === "partner" && personaOpen) || persona === p.prompt && p.prompt
-                  ? "border-[var(--accent)] bg-[var(--accent)] text-[var(--accent-ink)]"
-                  : "border-[var(--line)] bg-[var(--panel)] text-[var(--ink)]"
-              }`}
-            >
-              {p.label}
-            </button>
-          ))}
-        </div>
-
-        {personaOpen && (
-          <div className="pop-in grid w-full max-w-[420px] grid-cols-2 gap-3">
-            {partnerOptions.map((p) => (
-              <button
-                key={p.key}
-                type="button"
-                onClick={() => setPersona(p.prompt)}
-                className={`rounded-xl border px-4 py-3 font-semibold transition ${
-                  persona === p.prompt
-                    ? "border-[var(--accent)] bg-[var(--accent)] text-[var(--accent-ink)]"
-                    : "border-[var(--line)] bg-[var(--panel)] text-[var(--ink)]"
-                }`}
-              >
-                {p.label}
-              </button>
-            ))}
-          </div>
-        )}
-
-        <p className="mt-1 w-full max-w-[420px] text-left text-sm font-semibold text-[var(--muted)]">
-          Response language
-        </p>
-        <div className="grid w-full max-w-[420px] grid-cols-2 gap-2 sm:grid-cols-3">
-          {languages.map((l) => (
-            <button
-              key={l}
-              type="button"
-              onClick={() => setLang(l)}
-              className={`rounded-xl border px-3 py-2 text-sm font-semibold transition ${
-                lang === l
-                  ? "border-[var(--accent)] bg-[var(--accent)] text-[var(--accent-ink)]"
-                  : "border-[var(--line)] bg-[var(--panel)] text-[var(--ink)]"
-              }`}
-            >
-              {l}
-            </button>
-          ))}
-        </div>
-
-        {isProgrammer && (
-          <>
-            <p className="mt-1 w-full max-w-[420px] text-left text-sm font-semibold text-[var(--muted)]">
-              Coding language (optional)
-            </p>
-            <div className="grid w-full max-w-[420px] grid-cols-2 gap-2 sm:grid-cols-3">
-              {codingLanguages.map((l) => (
-                <button
-                  key={l}
-                  type="button"
-                  onClick={() => setCodeLang(codeLang === l ? "" : l)}
-                  className={`rounded-xl border px-3 py-2 text-sm font-semibold transition ${
-                    codeLang === l
-                      ? "border-[var(--accent)] bg-[var(--accent)] text-[var(--accent-ink)]"
-                      : "border-[var(--line)] bg-[var(--panel)] text-[var(--ink)]"
-                  }`}
-                >
-                  {l}
-                </button>
-              ))}
-            </div>
-            <input
-              value={codingLanguages.includes(codeLang) ? "" : codeLang}
-              onChange={(e) => setCodeLang(e.target.value)}
-              placeholder="Or type one, e.g. Ruby, Swift..."
-              className="w-full max-w-[420px] rounded-xl border border-[var(--line)] bg-[var(--panel)] px-4 py-2.5 text-[var(--ink)]"
             />
-          </>
-        )}
+            {canTalk && (
+              <button
+                type="button"
+                className={`icon-btn h-[46px] shrink-0 ${
+                  listening ? "!border-[var(--danger)] !text-[var(--danger)]" : ""
+                }`}
+                aria-label={listening ? "Stop voice input" : "Voice input"}
+                aria-pressed={listening}
+                title={listening ? "Stop voice input" : "Voice input"}
+                onClick={toggleMic}
+              >
+                {listening ? <StopIcon /> : <MicIcon />}
+              </button>
+            )}
+            <button
+              id="send"
+              type="submit"
+              disabled={!busy && !input.trim() && !attachments.length}
+              className={
+                busy
+                  ? "h-[46px] shrink-0 rounded-xl bg-[var(--ink)] px-[18px] font-semibold text-[var(--bg)]"
+                  : "h-[46px] shrink-0 rounded-xl bg-[var(--accent)] px-[18px] font-semibold text-[var(--accent-ink)] disabled:opacity-50"
+              }
+            >
+              {busy ? "Stop" : "Send"}
+            </button>
+          </div>
+        </form>
 
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={() => {
-              setPersona("");
-              setPersonaOpen(false);
-              setStarted(true);
-            }}
-            className="rounded-xl border border-[var(--line)] bg-[var(--panel)] px-6 py-3 font-semibold text-[var(--ink)]"
-          >
-            Skip
-          </button>
-          <button
-            type="button"
-            disabled={!persona}
-            onClick={() => setStarted(true)}
-            className="pop-in rounded-xl bg-[var(--accent)] px-8 py-3 font-semibold text-[var(--accent-ink)] disabled:opacity-50"
-          >
-            Chat Now!
-          </button>
-        </div>
-
-        <button
-          type="button"
-          onClick={() => setShowHistory(true)}
-          className="ghost"
-        >
-          History
-        </button>
-
-        <footer className="mt-8 w-full max-w-[420px] border-t border-[var(--line)] pt-4 text-sm text-[var(--muted)]">
+        <footer className="mx-auto w-full max-w-[760px] border-t border-[var(--line)] px-4 pb-5 pt-3 text-center text-xs text-[var(--muted)] sm:px-5">
           Made by{" "}
           <a
             href="https://github.com/nobel-saputra/rulerz"
@@ -565,189 +1083,29 @@ export default function ChatClient() {
             nobelsaputra
           </a>
         </footer>
-
-        {historyOverlay}
       </div>
-    );
-  }
 
-  return (
-    <div className="flex min-h-full flex-1 flex-col">
-      <header className="mx-auto flex w-full max-w-[760px] flex-wrap items-baseline justify-between gap-3 px-4 pb-3 pt-4 sm:px-5">
-        <h1
-          className="cursor-pointer font-[var(--display)] text-2xl font-bold tracking-tight transition hover:opacity-70 sm:text-[1.6rem]"
-          onClick={() => {
-            Swal.fire({
-              title: "Hey, are you wanna stay?",
-              text: "Your chat is saved, but leaving goes back to the main menu.",
-              showCancelButton: true,
-              confirmButtonText: "No, go to menu",
-              cancelButtonText: "Yes, stay",
-              reverseButtons: true,
-              background: "var(--panel)",
-              color: "var(--ink)",
-              confirmButtonColor: "#c0392b",
-              cancelButtonColor: "var(--accent)",
-            }).then((result) => {
-              if (result.isConfirmed) setStarted(false);
-            });
-          }}
-          title="Back to the main menu"
+      {drawerEl}
+
+      {lightbox && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
+          onClick={() => setLightbox(null)}
+          role="dialog"
+          aria-label="Image preview"
         >
-          Rulerz
-          <span className="ml-2.5 font-[var(--body)] text-[0.85rem] font-normal text-[var(--muted)] max-sm:hidden">
-            your AI assistant
-          </span>
-        </h1>
-        <div className="flex gap-2">
-        <button
-          className="ghost"
-          type="button"
-          onClick={() => {
-            setShowHistory(true);
-          }}
-        >
-          History
-        </button>
-        <button
-          className="ghost"
-          type="button"
-          onClick={() => {
-            controllerRef.current?.abort();
-            // simpan chat sekarang ke history
-            if (msgs.length > 0) {
-              const firstUser = msgs.find((m) => m.role === "user");
-              const session: Session = {
-                id: nextId(),
-                title: (firstUser?.text || "Untitled chat").slice(0, 60),
-                at: Date.now(),
-                msgs,
-                history: historyRef.current,
-                persona,
-                lang,
-                codeLang,
-              };
-              const updated = [session, ...sessions].slice(0, 30);
-              setSessions(updated);
-              try {
-                localStorage.setItem("rulerz-history", JSON.stringify(updated));
-              } catch {}
-            }
-            historyRef.current = [];
-            setMsgs([]);
-            try {
-              localStorage.removeItem("rulerz-chat");
-            } catch {}
-            setStarted(true);
-          }}
-        >
-          New chat
-        </button>
+          {/* eslint-disable-next-line @next/next/no-img-element -- data URL lokal */}
+          <img src={lightbox} alt="" className="max-h-full max-w-full rounded-lg" />
+          <button
+            type="button"
+            className="absolute right-4 top-4 flex h-9 w-9 items-center justify-center rounded-full bg-white/90 text-black"
+            aria-label="Close preview"
+            onClick={() => setLightbox(null)}
+          >
+            <XIcon />
+          </button>
         </div>
-      </header>
-
-      <main ref={scrollerRef} className="w-full flex-1 overflow-y-auto">
-        <div ref={logRef} className="mx-auto flex max-w-[760px] flex-col gap-[22px] px-4 pb-6 pt-2 sm:px-5" aria-live="polite">
-          {msgs.length === 0 && (
-            <div className="mt-[12vh] max-w-[46ch] text-[var(--muted)]">
-              <strong className="mb-1.5 block font-[var(--display)] text-[1.25rem] text-[var(--ink)]">
-                Start chatting.
-              </strong>
-              Ask anything. The answer will appear here.
-            </div>
-          )}
-
-          {msgs.map((m) => {
-            if (m.role === "user") {
-              return (
-                <div
-                  key={m.id}
-                  className="pop-in max-w-[92%] break-words whitespace-pre-wrap self-end rounded-[16px_16px_4px_16px] bg-[var(--accent)] px-[14px] py-[10px] text-[var(--accent-ink)] sm:max-w-[80%]"
-                >
-                  {m.text}
-                </div>
-              );
-            }
-            return (
-              <div
-                key={m.id}
-                className={`pop-in-left min-w-0 border-l-[3px] pl-[14px] ${
-                  m.role === "error" ? "border-[#c0392b] text-[#c0392b]" : "border-[var(--line)]"
-                }`}
-              >
-                {m.role === "error" ? (
-                  <div className="whitespace-pre-wrap break-words">{m.text}</div>
-                ) : (
-                  <>
-                    {m.text ? (
-                      <div
-                        className="select-text whitespace-pre-wrap break-words"
-                        dangerouslySetInnerHTML={{ __html: render(m.text) }}
-                      />
-                    ) : (
-                      <div className="dots" />
-                    )}
-                    {m.streaming && m.text && <span className="dots" />}
-                  </>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </main>
-
-      <form
-        className="mx-auto flex w-full max-w-[760px] items-end gap-2.5 px-4 pb-2 pt-2 sm:px-5"
-        onSubmit={(e) => {
-          e.preventDefault();
-          submit();
-        }}
-      >
-        <textarea
-          ref={inputRef}
-          rows={1}
-          value={input}
-          placeholder="Type a message, Enter to send"
-          aria-label="Message"
-          className="max-h-[180px] flex-1 resize-none rounded-xl border border-[var(--line)] bg-[var(--panel)] px-[14px] py-[11px] text-[var(--ink)]"
-          onChange={(e) => {
-            setInput(e.target.value);
-            e.target.style.height = "auto";
-            e.target.style.height = Math.min(e.target.scrollHeight, 180) + "px";
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-              e.preventDefault();
-              submit();
-            }
-          }}
-        />
-        <button
-          id="send"
-          type="submit"
-          className={
-            busy
-              ? "rounded-xl bg-[var(--ink)] px-[18px] py-[11px] font-semibold text-[var(--bg)]"
-              : "rounded-xl bg-[var(--accent)] px-[18px] py-[11px] font-semibold text-[var(--accent-ink)] disabled:opacity-50"
-          }
-        >
-          {busy ? "Stop" : "Send"}
-        </button>
-      </form>
-
-      <footer className="mx-auto w-full max-w-[760px] border-t border-[var(--line)] px-4 pb-5 pt-3 text-center text-xs text-[var(--muted)] sm:px-5">
-        Made by{" "}
-        <a
-          href="https://github.com/nobel-saputra/rulerz"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="font-semibold text-[var(--ink)] underline-offset-4 hover:underline"
-        >
-          nobelsaputra
-        </a>
-      </footer>
-
-      {historyOverlay}
+      )}
     </div>
   );
 }
