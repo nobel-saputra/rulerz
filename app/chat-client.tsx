@@ -9,27 +9,19 @@ import {
   ClipIcon,
   CopyIcon,
   MenuIcon,
-  MicIcon,
   PencilIcon,
   PlusIcon,
   RefreshIcon,
-  SpeakerIcon,
-  StopIcon,
   XIcon,
 } from "./components/icons";
 import {
   contextStartId,
-  createRecognition,
   exportSession,
   imageToDataUrl,
   playPluk,
-  speak,
-  stopSpeaking,
   toApiMessages,
-  ttsSupported,
-  type Recognition,
 } from "./lib/browser";
-import { buildSystemPrompt, langCode, personaLabel, SUGGESTIONS } from "./lib/personas";
+import { buildSystemPrompt, personaLabel, SUGGESTIONS } from "./lib/personas";
 import { CONTEXT_LIMIT, MAX_IMAGE_CHARS, MAX_IMAGES } from "./lib/shared";
 import {
   applyTheme,
@@ -102,12 +94,8 @@ export default function ChatClient() {
   const [drawer, setDrawer] = useState(false);
   const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [speakingId, setSpeakingId] = useState<string | null>(null);
-  const [listening, setListening] = useState(false);
   const [lightbox, setLightbox] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
-  const [canTalk] = useState(() => !!createRecognition());
-  const [canSpeak] = useState(() => ttsSupported());
 
   const controllerRef = useRef<AbortController | null>(null);
   const abortReasonRef = useRef<"user" | "switch">("user");
@@ -115,7 +103,6 @@ export default function ChatClient() {
   const stickRef = useRef(true);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
-  const recRef = useRef<Recognition | null>(null);
   const latestRef = useRef({ sessions, activeId, started, streamingId: null as string | null });
   const warnedFullRef = useRef(false);
 
@@ -203,15 +190,6 @@ export default function ChatClient() {
     return () => window.removeEventListener("keydown", onKey);
   }, [drawer, lightbox]);
 
-  // Hentikan suara & mic saat komponen dilepas.
-  useEffect(
-    () => () => {
-      stopSpeaking();
-      recRef.current?.stop();
-    },
-    []
-  );
-
   /* ---------- helper state ---------- */
   function patchSession(id: string, fn: (s: Session) => Session) {
     setSessions((list) => list.map((s) => (s.id === id ? fn(s) : s)));
@@ -250,8 +228,6 @@ export default function ChatClient() {
     patchSession(sid, (s) => ({ ...s, at: Date.now() }));
     setMsgsOf(sid, () => [...base, botMsg]);
     stickRef.current = true;
-    stopSpeaking();
-    setSpeakingId(null);
     if (prefs.sound) playPluk(520); // sound when sending
 
     const controller = new AbortController();
@@ -364,7 +340,6 @@ export default function ChatClient() {
     }
     const text = input.trim();
     if (!text && !attachments.length) return;
-    recRef.current?.stop();
     setInput("");
     setAttachments([]);
     ask(text, attachments);
@@ -399,25 +374,10 @@ export default function ChatClient() {
     });
   }
 
-  function toggleSpeak(m: UiMsg) {
-    if (speakingId === m.id) {
-      stopSpeaking();
-      setSpeakingId(null);
-      return;
-    }
-    setSpeakingId(m.id);
-    speak(m.text, langCode(active?.lang || ""), () =>
-      setSpeakingId((c) => (c === m.id ? null : c))
-    );
-  }
-
   /* ---------- sesi ---------- */
   function leaveCurrent() {
     stopStreaming("switch");
-    stopSpeaking();
-    setSpeakingId(null);
     setEditing(null);
-    recRef.current?.stop();
     stickRef.current = true;
   }
 
@@ -557,48 +517,6 @@ export default function ChatClient() {
     e.preventDefault();
     setDragOver(false);
     addFiles(Array.from(e.dataTransfer.files));
-  }
-
-  /* ---------- input suara ---------- */
-  function toggleMic() {
-    if (listening) {
-      recRef.current?.stop();
-      return;
-    }
-    const rec = createRecognition();
-    if (!rec) return;
-    recRef.current = rec;
-    rec.lang = langCode(active?.lang || "");
-    rec.continuous = true;
-    rec.interimResults = true;
-    const base = input ? input.replace(/\s*$/, " ") : "";
-    let finalText = "";
-    rec.onresult = (e) => {
-      let interim = "";
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        const r = e.results[i];
-        if (r.isFinal) finalText += r[0].transcript;
-        else interim += r[0].transcript;
-      }
-      setInput(base + finalText + interim);
-    };
-    rec.onerror = (e) => {
-      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
-        toast("Microphone access was blocked. Allow it in your browser settings.");
-      } else if (e.error !== "no-speech" && e.error !== "aborted") {
-        toast("Voice input stopped: " + e.error);
-      }
-    };
-    rec.onend = () => {
-      setListening(false);
-      if (recRef.current === rec) recRef.current = null;
-    };
-    try {
-      rec.start();
-      setListening(true);
-    } catch {
-      setListening(false);
-    }
   }
 
   /* ---------- tampilan ---------- */
@@ -863,24 +781,6 @@ export default function ChatClient() {
                         <CopyIcon width={13} height={13} />
                         {copiedId === m.id ? "Copied!" : "Copy"}
                       </button>
-                      {canSpeak && (
-                        <button
-                          type="button"
-                          className="msg-action inline-flex items-center gap-1"
-                          onClick={() => toggleSpeak(m)}
-                          aria-pressed={speakingId === m.id}
-                        >
-                          {speakingId === m.id ? (
-                            <>
-                              <StopIcon width={13} height={13} /> Stop
-                            </>
-                          ) : (
-                            <>
-                              <SpeakerIcon width={13} height={13} /> Listen
-                            </>
-                          )}
-                        </button>
-                      )}
                       {m.id === lastId && !busy && (
                         <button
                           type="button"
@@ -967,7 +867,7 @@ export default function ChatClient() {
               ref={inputRef}
               rows={1}
               value={input}
-              placeholder={listening ? "Listening…" : "Type a message, Enter to send"}
+              placeholder="Type a message, Enter to send"
               aria-label="Message"
               className="max-h-[180px] min-w-0 flex-1 resize-none rounded-xl border border-[var(--line)] bg-[var(--panel)] px-[14px] py-[11px] text-[var(--ink)]"
               onChange={(e) => setInput(e.target.value)}
@@ -979,20 +879,6 @@ export default function ChatClient() {
                 }
               }}
             />
-            {canTalk && (
-              <button
-                type="button"
-                className={`icon-btn h-[46px] shrink-0 ${
-                  listening ? "!border-[var(--danger)] !text-[var(--danger)]" : ""
-                }`}
-                aria-label={listening ? "Stop voice input" : "Voice input"}
-                aria-pressed={listening}
-                title={listening ? "Stop voice input" : "Voice input"}
-                onClick={toggleMic}
-              >
-                {listening ? <StopIcon /> : <MicIcon />}
-              </button>
-            )}
             <button
               id="send"
               type="submit"

@@ -62,23 +62,19 @@ export function personaLabel(key: PersonaKey): string {
   return [...PERSONAS, ...PARTNER_OPTIONS].find((p) => p.key === key)?.label || "Assistant";
 }
 
-/** Bahasa jawaban + kode BCP-47 untuk input & output suara. */
-export const LANGUAGES: { label: string; code: string }[] = [
-  { label: "English (US)", code: "en-US" },
-  { label: "English (UK)", code: "en-GB" },
-  { label: "Indonesian", code: "id-ID" },
-  { label: "Spanish", code: "es-ES" },
-  { label: "French", code: "fr-FR" },
-  { label: "German", code: "de-DE" },
-  { label: "Japanese", code: "ja-JP" },
-  { label: "Mandarin", code: "zh-CN" },
-  { label: "Korean", code: "ko-KR" },
-  { label: "Arabic", code: "ar-SA" },
+/** Bahasa jawaban. */
+export const LANGUAGES: { label: string }[] = [
+  { label: "English (US)" },
+  { label: "English (UK)" },
+  { label: "Indonesian" },
+  { label: "Spanish" },
+  { label: "French" },
+  { label: "German" },
+  { label: "Japanese" },
+  { label: "Mandarin" },
+  { label: "Korean" },
+  { label: "Arabic" },
 ];
-
-export function langCode(label: string): string {
-  return LANGUAGES.find((l) => l.label === label)?.code || "en-US";
-}
 
 export const CODING_LANGUAGES = [
   "TypeScript",

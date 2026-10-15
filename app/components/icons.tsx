@@ -64,23 +64,6 @@ export const RefreshIcon = (p: P) => (
     <path d="M21 3v5h-5" />
   </Svg>
 );
-export const SpeakerIcon = (p: P) => (
-  <Svg {...p}>
-    <path d="M11 5 6 9H2v6h4l5 4V5Z" />
-    <path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14" />
-  </Svg>
-);
-export const StopIcon = (p: P) => (
-  <Svg {...p}>
-    <rect x="6" y="6" width="12" height="12" rx="1" />
-  </Svg>
-);
-export const MicIcon = (p: P) => (
-  <Svg {...p}>
-    <rect x="9" y="2" width="6" height="12" rx="3" />
-    <path d="M5 10a7 7 0 0 0 14 0M12 17v5" />
-  </Svg>
-);
 export const ClipIcon = (p: P) => (
   <Svg {...p}>
     <path d="m21 11-8.5 8.5a5 5 0 0 1-7-7L14 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L15 7" />
