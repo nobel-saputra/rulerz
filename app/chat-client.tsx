@@ -30,7 +30,7 @@ import {
   type Recognition,
 } from "./lib/browser";
 import { buildSystemPrompt, langCode, personaLabel, SUGGESTIONS } from "./lib/personas";
-import { CONTEXT_LIMIT, MAX_IMAGE_CHARS, MAX_IMAGES, type ModelInfo } from "./lib/shared";
+import { CONTEXT_LIMIT, MAX_IMAGE_CHARS, MAX_IMAGES } from "./lib/shared";
 import {
   applyTheme,
   loadPrefs,
@@ -95,7 +95,6 @@ export default function ChatClient() {
   const [started, setStarted] = useState(boot.stored.started);
   const [prefs, setPrefs] = useState<Prefs>(boot.prefs);
   const [theme, setTheme] = useState<Theme>(boot.theme);
-  const [models, setModels] = useState<ModelInfo[] | null>(null);
 
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<string[]>([]);
@@ -164,26 +163,6 @@ export default function ChatClient() {
       window.removeEventListener("storage", onStorage);
     };
   }, []);
-
-  /* ---------- daftar model gratis ---------- */
-  useEffect(() => {
-    let cancelled = false;
-    fetch("/api/models")
-      .then((r) => r.json())
-      .then((j: { models?: ModelInfo[] }) => {
-        if (!cancelled) setModels(Array.isArray(j.models) ? j.models : []);
-      })
-      .catch(() => {
-        if (!cancelled) setModels([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // Model pilihan yang sudah tidak ada di daftar dianggap "Auto".
-  const chosenModel =
-    prefs.model && models && !models.some((m) => m.id === prefs.model) ? "" : prefs.model;
 
   /* ---------- auto-scroll hanya kalau user ada di bawah ---------- */
   useEffect(() => {
@@ -266,7 +245,6 @@ export default function ChatClient() {
       id: nextId(),
       role: "bot",
       text: "",
-      wanted: chosenModel || undefined,
       streaming: true,
     };
     patchSession(sid, (s) => ({ ...s, at: Date.now() }));
@@ -289,7 +267,6 @@ export default function ChatClient() {
         body: JSON.stringify({
           messages: toApiMessages(base),
           system: buildSystemPrompt(session),
-          model: chosenModel || undefined,
         }),
         signal: controller.signal,
       });
@@ -301,10 +278,6 @@ export default function ChatClient() {
         } catch {}
         throw new Error(msg);
       }
-
-      const model = res.headers.get("X-Model-Used") || "";
-      const skipped = Number(res.headers.get("X-Models-Skipped") || 0);
-      updateMsg(sid, botMsg.id, { model, skipped });
 
       const reader = res.body!.getReader();
       const dec = new TextDecoder();
@@ -679,10 +652,6 @@ export default function ChatClient() {
 
   const ctxStart = contextStartId(msgs);
   const lastId = msgs[msgs.length - 1]?.id;
-  const visionModels = models?.filter((m) => m.vision) || [];
-  const chosenInfo = models?.find((m) => m.id === chosenModel);
-  const modelName = (id: string) =>
-    models?.find((m) => m.id === id)?.name || id.replace(/^[^/]+\//, "").replace(/:free$/, "");
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -714,22 +683,6 @@ export default function ChatClient() {
               {active.codeLang ? ` · ${active.codeLang}` : ""}
             </span>
           </button>
-          <select
-            value={chosenModel}
-            onChange={(e) => updatePrefs({ model: e.target.value })}
-            aria-label="Model"
-            title="Model (Auto picks the best available free model)"
-            className="w-[130px] shrink-0 truncate rounded-lg border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5 text-sm text-[var(--ink)] sm:w-[210px]"
-          >
-            <option value="">Auto</option>
-            {models === null && <option disabled>Loading models…</option>}
-            {models?.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name}
-                {m.vision ? " · images" : ""}
-              </option>
-            ))}
-          </select>
           <button
             type="button"
             className="icon-btn shrink-0"
@@ -937,16 +890,6 @@ export default function ChatClient() {
                           <RefreshIcon width={13} height={13} /> Regenerate
                         </button>
                       )}
-                      {m.model && (
-                        <span className="ml-1 text-[0.72rem] text-[var(--muted)]" title={m.model}>
-                          via {modelName(m.model)}
-                          {m.wanted && m.wanted !== m.model
-                            ? ` · ${modelName(m.wanted)} was unavailable`
-                            : m.skipped
-                              ? ` · ${m.skipped} busy model${m.skipped > 1 ? "s" : ""} skipped`
-                              : ""}
-                        </span>
-                      )}
                     </div>
                   )}
                 </div>
@@ -995,13 +938,6 @@ export default function ChatClient() {
                   </div>
                 ))}
               </div>
-              <p className="mt-1 text-xs text-[var(--muted)]">
-                {models && visionModels.length === 0
-                  ? "No free model can read images right now — sending may fail."
-                  : chosenInfo && !chosenInfo.vision
-                    ? "The selected model can't read images, so a model that can will answer instead."
-                    : "A model that can read images will answer."}
-              </p>
             </div>
           )}
 

@@ -8,10 +8,6 @@ export interface UiMsg {
   images?: string[];
   /** Jumlah gambar yang terpaksa dibuang karena localStorage penuh. */
   imagesLost?: number;
-  model?: string;
-  /** Model yang dipilih user saat pesan dikirim ("" = Auto). */
-  wanted?: string;
-  skipped?: number;
   streaming?: boolean;
 }
 
@@ -30,7 +26,6 @@ export interface Session {
 
 export interface Prefs {
   sound: boolean;
-  model: string;
   customPersona: string;
 }
 
@@ -42,7 +37,7 @@ const PREFS_KEY = "rulerz-prefs";
 export const THEME_KEY = "rulerz-theme";
 const MAX_SESSIONS = 50;
 
-export const DEFAULT_PREFS: Prefs = { sound: true, model: "", customPersona: "" };
+export const DEFAULT_PREFS: Prefs = { sound: true, customPersona: "" };
 
 export function nextId(prefix = "msg"): string {
   return prefix + "-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 9);
@@ -241,7 +236,6 @@ export function loadPrefs(): Prefs {
   const p = read<Partial<Prefs>>(PREFS_KEY);
   return {
     sound: typeof p?.sound === "boolean" ? p.sound : DEFAULT_PREFS.sound,
-    model: typeof p?.model === "string" ? p.model : DEFAULT_PREFS.model,
     customPersona:
       typeof p?.customPersona === "string" ? p.customPersona : DEFAULT_PREFS.customPersona,
   };

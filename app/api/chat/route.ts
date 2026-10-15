@@ -21,29 +21,22 @@ const SYSTEM_PROMPT = process.env.SYSTEM_PROMPT || "";
 const RATE_LIMIT_PER_MIN = Number(process.env.RATE_LIMIT_PER_MIN || 20);
 
 const COOLDOWN_MS = 2 * 60 * 1000;
+// Ditolak permanen (akses/model tidak ada): jangan dicoba lagi untuk sementara.
+const BLOCKED_MS = 60 * 60 * 1000;
 const FIRST_TOKEN_TIMEOUT_MS = 20000;
 
 /* ---------- kandidat model ---------- */
 const cooling = new Map<string, number>();
+// Model yang terakhir berhasil menjawab dicoba lebih dulu.
+let lastGood = "";
 
-async function buildCandidates(opts: {
-  chosen: string;
-  needVision: boolean;
-}): Promise<string[]> {
+async function buildCandidates(needVision: boolean): Promise<string[]> {
   const { free, byId } = await getModels();
-  // Model pilihan user hanya diterima kalau ada di daftar gratis, dan selalu
-  // dicoba lebih dulu walau sedang cooldown (user memilihnya secara sadar).
-  const chosen =
-    free.some((m) => m.id === opts.chosen) && (!opts.needVision || byId.get(opts.chosen)?.vision)
-      ? [opts.chosen]
-      : [];
-  let all = [...new Set([...PREFERRED, ...free.map((m) => m.id)])].filter(
-    (id) => !chosen.includes(id)
-  );
-  if (opts.needVision) all = all.filter((id) => byId.get(id)?.vision);
+  let all = [...new Set([lastGood, ...PREFERRED, ...free.map((m) => m.id)])].filter(Boolean);
+  if (needVision) all = all.filter((id) => byId.get(id)?.vision);
   const now = Date.now();
   const ready = all.filter((id) => (cooling.get(id) || 0) < now);
-  return [...chosen, ...(ready.length ? ready : all)].slice(0, MAX_TRIES);
+  return (ready.length ? ready : all).slice(0, MAX_TRIES);
 }
 
 /* ---------- rate limit sederhana per IP ---------- */
@@ -140,7 +133,7 @@ async function tryModel(
       body: JSON.stringify({ model, messages, stream: true }),
       signal: ctrl.signal,
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}`), { status: res.status });
 
     const reader = res.body!.getReader();
     const dec = new TextDecoder();
@@ -187,7 +180,7 @@ export async function POST(req: Request) {
     );
   }
 
-  let body: { messages?: unknown; system?: unknown; model?: unknown };
+  let body: { messages?: unknown; system?: unknown };
   try {
     body = await req.json();
   } catch {
@@ -199,7 +192,6 @@ export async function POST(req: Request) {
     typeof body?.system === "string"
       ? body.system.slice(0, MAX_PERSONA_CHARS).trim()
       : "";
-  const chosen = typeof body?.model === "string" ? body.model : "";
   const { messages, images } = sanitize(body?.messages);
 
   if (!messages.length || messages[messages.length - 1].role !== "user") {
@@ -211,23 +203,23 @@ export async function POST(req: Request) {
   const clientCtrl = new AbortController();
   req.signal.addEventListener("abort", () => clientCtrl.abort());
 
-  const candidates = await buildCandidates({ chosen, needVision: images > 0 });
+  const candidates = await buildCandidates(images > 0);
   if (!candidates.length) {
     return Response.json(
       {
         error: images
-          ? "No free model that can read images is available right now. Remove the image or try again later."
-          : "The free model list is empty.",
+          ? "Images can't be read right now. Remove the image or try again later."
+          : "The assistant is unavailable right now. Please try again later.",
       },
       { status: 503 }
     );
   }
 
-  let skipped = 0;
   for (const model of candidates) {
     if (clientCtrl.signal.aborted) return new Response(null, { status: 499 });
     try {
       const { reader, held } = await tryModel(model, messages, clientCtrl.signal);
+      lastGood = model;
 
       const stream = new ReadableStream<Uint8Array>({
         async start(controller) {
@@ -255,21 +247,21 @@ export async function POST(req: Request) {
           "Content-Type": "text/event-stream; charset=utf-8",
           "Cache-Control": "no-cache, no-transform",
           Connection: "keep-alive",
-          "X-Model-Used": model,
-          "X-Models-Skipped": String(skipped),
         },
       });
     } catch (e) {
       if (clientCtrl.signal.aborted) return new Response(null, { status: 499 });
       console.warn(`[skip] ${model}: ${(e as Error).message}`);
-      cooling.set(model, Date.now() + COOLDOWN_MS);
-      skipped++;
+      const status = (e as { status?: number }).status;
+      const permanent = status === 401 || status === 403 || status === 404;
+      cooling.set(model, Date.now() + (permanent ? BLOCKED_MS : COOLDOWN_MS));
+      if (model === lastGood) lastGood = "";
     }
   }
 
   return Response.json(
     {
-      error: "All free models are busy or unavailable. Please try again later.",
+      error: "The assistant is busy right now. Please try again in a moment.",
     },
     { status: 503 }
   );
